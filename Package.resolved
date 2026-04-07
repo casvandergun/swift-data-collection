@@ -1,0 +1,15 @@
+{
+  "originHash" : "d5e4e3801ea34ca44f6417d4af592b87a9cfd73899048d4c38ff745ba03e4933",
+  "pins" : [
+    {
+      "identity" : "electric-swift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/casvandergun/electric-swift.git",
+      "state" : {
+        "revision" : "75b6ffd3bb90c11078d216c978fd2287922d905a",
+        "version" : "0.1.0"
+      }
+    }
+  ],
+  "version" : 3
+}
