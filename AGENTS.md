@@ -67,10 +67,8 @@ The project is intentionally SwiftData-first:
 - The model's primary `id` must be a stable, globally unique, immutable sync identifier.
 - Collections declare that identifier via `ElectricModelIdentifier`; do not require a model-level `electricID` property or a second stored sync key.
 - Keep additional row sync metadata minimal:
-  - `electricSyncState`
-  - `electricPendingMutationCount`
-  - `electricLastLocalMutationAt`
-  - `electricLastServerVersion`
+  - `collectionSyncState`
+  - `collectionPendingMutationCount`
 - Keep collection metadata separate from row data.
 
 ## Non-Goals

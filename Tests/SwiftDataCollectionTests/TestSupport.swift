@@ -111,27 +111,21 @@ extension SwiftDataCollectionStore {
 
 @Model
 final class TestTodo: SwiftDataCollectionModel {
-    var collectionSyncStateRawValue: String
+    var collectionSyncState: ElectricSyncState
     var collectionPendingMutationCount: Int
-    var collectionLastLocalMutationAt: Date?
-    var collectionLastServerVersion: String?
     var id: String
     var projectID: String
     var title: String
 
     init(
-        collectionSyncStateRawValue: String = ElectricSyncState.synced.rawValue,
+        collectionSyncState: ElectricSyncState = .synced,
         collectionPendingMutationCount: Int = 0,
-        collectionLastLocalMutationAt: Date? = nil,
-        collectionLastServerVersion: String? = nil,
         id: String,
         projectID: String,
         title: String
     ) {
-        self.collectionSyncStateRawValue = collectionSyncStateRawValue
+        self.collectionSyncState = collectionSyncState
         self.collectionPendingMutationCount = collectionPendingMutationCount
-        self.collectionLastLocalMutationAt = collectionLastLocalMutationAt
-        self.collectionLastServerVersion = collectionLastServerVersion
         self.id = id
         self.projectID = projectID
         self.title = title

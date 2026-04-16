@@ -116,7 +116,7 @@ struct ElectricSwiftDataBatchApplicationTests {
         let synchronizer = ElectricCollectionSynchronizer(identifier: testTodoIdentifier)
 
         let todo = TestTodo(
-            collectionSyncStateRawValue: ElectricSyncState.pendingUpdate.rawValue,
+            collectionSyncState: .pendingUpdate,
             collectionPendingMutationCount: 1,
             id: "todo-1",
             projectID: "project-a",
@@ -338,7 +338,7 @@ struct ElectricSwiftDataBatchApplicationTests {
         )
 
         let todo = TestTodo(
-            collectionSyncStateRawValue: ElectricSyncState.pendingUpdate.rawValue,
+            collectionSyncState: .pendingUpdate,
             collectionPendingMutationCount: 1,
             id: "todo-1",
             projectID: "project-a",

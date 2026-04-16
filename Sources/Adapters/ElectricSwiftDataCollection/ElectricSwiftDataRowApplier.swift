@@ -72,7 +72,6 @@ public struct ElectricSwiftDataRowApplier<Model: SwiftDataCollectionModel, ID: H
                     operation: operation,
                     key: key,
                     row: row,
-                    batchState: batch.state,
                     in: context
                 )
                 logApply(
@@ -153,10 +152,8 @@ public struct ElectricSwiftDataRowApplier<Model: SwiftDataCollectionModel, ID: H
         operation: ElectricOperation,
         key: String,
         row: ElectricRow,
-        batchState: ShapeStreamState,
         in context: ModelContext
     ) throws -> UpsertOutcome {
-        let serverVersion = rowVersion(for: row, batchState: batchState)
         let collectionRow = CollectionRow(electricRow: row)
         if let existing = try fetchModel(key: key, in: context) {
             let appliedRow = if operation == .update {
@@ -167,14 +164,12 @@ public struct ElectricSwiftDataRowApplier<Model: SwiftDataCollectionModel, ID: H
             try existing.apply(collectionRow: appliedRow, decoder: rowDecoder)
             existing.collectionPendingMutationCount = 0
             existing.collectionSyncState = .synced
-            existing.collectionLastServerVersion = serverVersion
             return operation == .update ? .mergedPatch : .updated
         }
 
         let model = try Model(collectionRow: collectionRow, decoder: rowDecoder)
         model.collectionPendingMutationCount = 0
         model.collectionSyncState = .synced
-        model.collectionLastServerVersion = serverVersion
         context.insert(model)
         return .inserted
     }
@@ -209,10 +204,6 @@ public struct ElectricSwiftDataRowApplier<Model: SwiftDataCollectionModel, ID: H
             deletedCount += 1
         }
         return deletedCount
-    }
-
-    private func rowVersion(for row: ElectricRow, batchState: ShapeStreamState) -> String {
-        batchState.offset
     }
 
     private var modelName: String {

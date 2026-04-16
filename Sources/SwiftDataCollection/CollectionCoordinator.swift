@@ -662,25 +662,21 @@ actor CollectionCoordinator<
         _ changes: [OptimisticModelChange],
         in context: ModelContext
     ) throws {
-        let mutationDate = Date()
         for change in changes {
             switch change {
             case .create(_, let row):
                 let model = try Model(collectionRow: row, decoder: rowDecoder)
-                model.collectionLastLocalMutationAt = mutationDate
                 context.insert(model)
             case .update(let key, let row):
                 guard let model = try fetchModel(key: key, in: context) else {
                     throw CollectionError.modelNotFound(key)
                 }
                 try model.apply(collectionRow: row, decoder: rowDecoder)
-                model.collectionLastLocalMutationAt = mutationDate
             case .delete(let key):
                 guard let model = try fetchModel(key: key, in: context) else {
                     throw CollectionError.modelNotFound(key)
                 }
                 model.collectionSyncState = .pendingDelete
-                model.collectionLastLocalMutationAt = mutationDate
             }
         }
     }

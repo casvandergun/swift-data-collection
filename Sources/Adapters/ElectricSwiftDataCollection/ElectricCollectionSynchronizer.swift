@@ -168,7 +168,6 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
             return resolvedTransactionIDs
         }
 
-        let serverVersion = txids.max().map(String.init) ?? batchState.offset
         let protectedFields = Set(
             pending
                 .filter { $0.operation != .delete }
@@ -187,7 +186,6 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
                 try existing.apply(collectionRow: appliedRow, decoder: rowDecoder)
                 existing.collectionPendingMutationCount = 0
                 existing.collectionSyncState = .synced
-                existing.collectionLastServerVersion = serverVersion
                 logApply(
                     operation == .update ? "merged patch into existing model" : "updated existing model",
                     metadata: messageMetadata(
@@ -209,7 +207,7 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
                     preserving: protectedFields
                 )
                 try existing.apply(collectionRow: mergedRow, decoder: rowDecoder)
-                applyPendingSummary(pending, serverVersion: serverVersion, to: existing)
+                applyPendingSummary(pending, to: existing)
                 logApply(
                     "merged server row into pending local model",
                     metadata: messageMetadata(
@@ -242,7 +240,6 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
         if pending.isEmpty {
             model.collectionPendingMutationCount = 0
             model.collectionSyncState = .synced
-            model.collectionLastServerVersion = serverVersion
             logApply(
                 "inserted new model",
                 metadata: messageMetadata(
@@ -258,7 +255,7 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
                 )
             )
         } else {
-            applyPendingSummary(pending, serverVersion: serverVersion, to: model)
+            applyPendingSummary(pending, to: model)
             logApply(
                 "inserted model while preserving pending local fields",
                 metadata: messageMetadata(
@@ -405,13 +402,8 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
         Set(transactionsByID[transactionID]?.awaitedObservationTokens.compactMap(Int64.init) ?? [])
     }
 
-    private func applyPendingSummary(
-        _ pending: [PendingCollectionMutation],
-        serverVersion: String,
-        to model: Model
-    ) {
+    private func applyPendingSummary(_ pending: [PendingCollectionMutation], to model: Model) {
         model.collectionPendingMutationCount = pending.count
-        model.collectionLastServerVersion = serverVersion
         if pending.contains(where: { $0.status == .failed }) {
             model.collectionSyncState = .syncError
         } else if pending.contains(where: { $0.operation == .create }) {

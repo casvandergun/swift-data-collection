@@ -108,22 +108,13 @@ public enum CollectionSyncState: String, Sendable, Codable, Hashable {
 }
 
 public protocol SwiftDataCollectionModel: PersistentModel {
-    var collectionSyncStateRawValue: String { get set }
+    var collectionSyncState: CollectionSyncState { get set }
     var collectionPendingMutationCount: Int { get set }
-    var collectionLastLocalMutationAt: Date? { get set }
-    var collectionLastServerVersion: String? { get set }
 
     init(collectionRow: CollectionRow, decoder: CollectionRowDecoder) throws
 
     func apply(collectionRow: CollectionRow, decoder: CollectionRowDecoder) throws
     func collectionRow() throws -> CollectionRow
-}
-
-public extension SwiftDataCollectionModel {
-    var collectionSyncState: CollectionSyncState {
-        get { CollectionSyncState(rawValue: collectionSyncStateRawValue) ?? .synced }
-        set { collectionSyncStateRawValue = newValue.rawValue }
-    }
 }
 
 public struct CollectionModelIdentifier<Model: PersistentModel, ID: Hashable & Sendable>: Sendable {
