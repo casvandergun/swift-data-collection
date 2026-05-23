@@ -1,4 +1,4 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.3
 
 import PackageDescription
 
@@ -19,7 +19,7 @@ let package = Package(
         ),
     ],
     dependencies: [
-        .package(url: "https://github.com/casvandergun/electric-swift.git", exact: "0.1.0")
+        .package(url: "https://github.com/casvandergun/electric-swift.git", exact: "0.1.0"),
     ],
     targets: [
         .target(
