@@ -22,7 +22,8 @@ actor FetchCollectionAdapterRuntime<
         self.modelContainer = context.modelContainer
         self.context = FetchCollectionContext(
             debugName: context.debugName,
-            modelName: configuration.modelName
+            modelName: configuration.modelName,
+            scopeID: configuration.scopeID
         )
         self.identifier = context.identifier
         self.rowDecoder = context.rowDecoder
@@ -80,18 +81,18 @@ struct FetchCollectionSnapshotApplier<
 
             returnedKeys.insert(key)
             if let existing = try fetchModel(key: key, in: context) {
-                try existing.apply(collectionRow: row, decoder: rowDecoder)
-                refreshSyncState(
-                    for: existing,
+                try applyFetchedRow(
+                    row,
+                    to: existing,
                     pending: unresolvedMutations[key] ?? []
                 )
             } else {
-                decoded.collectionSyncState = .synced
-                decoded.collectionPendingMutationCount = 0
-                refreshSyncState(
-                    for: decoded,
-                    pending: unresolvedMutations[key] ?? []
-                )
+                let pending = unresolvedMutations[key] ?? []
+                guard pending.contains(where: { $0.operation == .delete }) == false else {
+                    continue
+                }
+                try applyPendingMutationPayloads(to: decoded, pending: pending)
+                refreshSyncState(for: decoded, pending: pending)
                 context.insert(decoded)
             }
         }
@@ -124,6 +125,59 @@ struct FetchCollectionSnapshotApplier<
 
     private func fetchModel(key: String, in context: ModelContext) throws -> Model? {
         try context.fetch(identifier.fetchDescriptor(forSerializedKey: key)).first
+    }
+
+    private func applyFetchedRow(
+        _ row: CollectionRow,
+        to model: Model,
+        pending: [PendingCollectionMutation]
+    ) throws {
+        guard pending.isEmpty == false else {
+            try model.apply(collectionRow: row, decoder: rowDecoder)
+            model.collectionPendingMutationCount = 0
+            model.collectionSyncState = .synced
+            return
+        }
+
+        if pending.contains(where: { $0.status == .failed }) ||
+            pending.contains(where: { $0.operation == .delete }) {
+            refreshSyncState(for: model, pending: pending)
+            return
+        }
+
+        let protectedFields = protectedPendingFields(pending)
+        let merged = CollectionRowPatcher.applying(
+            patch: row,
+            to: try model.collectionRow(),
+            preserving: protectedFields
+        )
+        try model.apply(collectionRow: merged, decoder: rowDecoder)
+        refreshSyncState(for: model, pending: pending)
+    }
+
+    private func applyPendingMutationPayloads(
+        to model: Model,
+        pending: [PendingCollectionMutation]
+    ) throws {
+        guard pending.isEmpty == false else { return }
+        guard pending.contains(where: { $0.status == .failed }) == false else { return }
+
+        var row = try model.collectionRow()
+        for mutation in pending where mutation.operation != .delete {
+            row = CollectionRowPatcher.applying(
+                patch: mutation.payload,
+                to: row
+            )
+        }
+        try model.apply(collectionRow: row, decoder: rowDecoder)
+    }
+
+    private func protectedPendingFields(_ pending: [PendingCollectionMutation]) -> Set<String> {
+        Set(
+            pending
+                .filter { $0.operation != .delete }
+                .flatMap(\.changedFields)
+        )
     }
 
     private func unresolvedMutationsByKey(
@@ -165,4 +219,3 @@ struct FetchCollectionSnapshotApplier<
 public enum FetchCollectionError: Error, Sendable {
     case missingStableIdentifier
 }
-

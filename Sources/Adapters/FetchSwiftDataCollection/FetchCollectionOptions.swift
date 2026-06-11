@@ -18,6 +18,7 @@ public struct FetchCollectionContext<
 >: Sendable {
     public let debugName: String
     public let modelName: String
+    public let scopeID: String
 }
 
 public enum FetchMissingRowPolicy: Sendable, Hashable {
@@ -32,6 +33,7 @@ public struct FetchCollectionOptions<
     public let debugName: String
     public let identifier: CollectionModelIdentifier<Model, ID>
     public let modelName: String
+    public let scopeID: String
     public let missingRowPolicy: FetchMissingRowPolicy
     public let fetch: FetchCollectionHandler<Model, ID>
     public let onInsert: FetchMutationHandler<Model, ID>?
@@ -40,6 +42,7 @@ public struct FetchCollectionOptions<
 
     public init(
         debugName: String? = nil,
+        scopeID: String,
         identifier: CollectionModelIdentifier<Model, ID>,
         modelName: String = String(reflecting: Model.self),
         missingRowPolicy: FetchMissingRowPolicy = .deleteSyncedRows,
@@ -51,6 +54,7 @@ public struct FetchCollectionOptions<
         self.debugName = debugName ?? modelName
         self.identifier = identifier
         self.modelName = modelName
+        self.scopeID = scopeID
         self.missingRowPolicy = missingRowPolicy
         self.fetch = fetch
         self.onInsert = onInsert
@@ -60,7 +64,7 @@ public struct FetchCollectionOptions<
 
     public func collectionOptions() -> CollectionOptions<Model, ID> {
         let adapter = CollectionAdapter<Model, ID>(
-            sourceID: Self.sourceID(modelName: modelName),
+            sourceID: Self.sourceID(modelName: modelName, scopeID: scopeID),
             makeRuntime: { context in
                 FetchCollectionAdapterRuntime(
                     configuration: self,
@@ -80,8 +84,8 @@ public struct FetchCollectionOptions<
         )
     }
 
-    static func sourceID(modelName: String) -> String {
-        "fetch:\(modelName)"
+    static func sourceID(modelName: String, scopeID: String) -> String {
+        "fetch:\(modelName):\(scopeID)"
     }
 
     private static func wrap(
@@ -101,6 +105,7 @@ public func fetchCollectionOptions<
     ID: Hashable & Sendable
 >(
     debugName: String? = nil,
+    scopeID: String,
     identifier: CollectionModelIdentifier<Model, ID>,
     modelName: String = String(reflecting: Model.self),
     missingRowPolicy: FetchMissingRowPolicy = .deleteSyncedRows,
@@ -111,6 +116,7 @@ public func fetchCollectionOptions<
 ) -> CollectionOptions<Model, ID> {
     FetchCollectionOptions(
         debugName: debugName,
+        scopeID: scopeID,
         identifier: identifier,
         modelName: modelName,
         missingRowPolicy: missingRowPolicy,
@@ -121,4 +127,3 @@ public func fetchCollectionOptions<
     )
     .collectionOptions()
 }
-

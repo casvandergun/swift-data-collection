@@ -66,6 +66,7 @@ let todos = try await store.collection(
     Todo.self,
     options: fetchCollectionOptions(
         debugName: "Project todos",
+        scopeID: "project:\(projectID)",
         identifier: todoIdentifier,
         fetch: { _ in
             try await api.todos(projectID: projectID).map(\.collectionRow)
@@ -79,7 +80,7 @@ let todos = try await store.collection(
 await todos.start()
 ```
 
-The fetch adapter treats each successful fetch as the complete authoritative snapshot for the local working set. It does not manage dynamic subsets or overlapping query keys; bound the fetch closure itself, for example by project or account, when the server table is large.
+The fetch adapter treats each successful fetch as the complete authoritative snapshot for the named `scopeID`. It does not manage dynamic subsets or overlapping query keys; bound the fetch closure itself, for example by project or account, when the server table is large. Mutation completion assumes the fetch endpoint provides adequate read-after-write behavior.
 
 ## Electric-Backed Collection
 
