@@ -1,4 +1,5 @@
 @testable import ElectricSwiftDataCollection
+@testable import FetchSwiftDataCollection
 @testable import SwiftDataCollection
 @testable import ElectricSwift
 import Foundation

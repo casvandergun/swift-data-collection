@@ -28,6 +28,12 @@ See [ROADMAP.md](/Users/casvandergun/Documents/projects/swift-data-collection/RO
   - `ElectricShapeStore`, `ElectricShapeSubscription`, and `ElectricSwiftDataRowApplier`
   - `ElectricCollectionSynchronizer` for mutation-aware Electric reconciliation
 
+- `FetchSwiftDataCollection`
+  - fetch-backed `fetchCollectionOptions(...)`
+  - complete-snapshot materialization into SwiftData
+  - mutation handlers that complete after an automatic refresh
+  - `.deleteSyncedRows` and `.keepLocalRows` missing-row policies
+
 The adapter depends on [`ElectricSwift`](https://github.com/casvandergun/electric-swift) v0.1.0 for Electric protocol/runtime types.
 
 ## Architecture
@@ -46,6 +52,34 @@ ElectricRow / ElectricValue
   -> SwiftDataCollectionModel
   -> SwiftData @Model
 ```
+
+## Fetch-Backed Collection
+
+```swift
+import FetchSwiftDataCollection
+import SwiftDataCollection
+import SwiftData
+
+let store = SwiftDataCollectionStore(modelContainer: container)
+
+let todos = try await store.collection(
+    Todo.self,
+    options: fetchCollectionOptions(
+        debugName: "Project todos",
+        identifier: todoIdentifier,
+        fetch: { _ in
+            try await api.todos(projectID: projectID).map(\.collectionRow)
+        },
+        onUpdate: { context in
+            try await api.todos.update(context.mutations)
+        }
+    )
+)
+
+await todos.start()
+```
+
+The fetch adapter treats each successful fetch as the complete authoritative snapshot for the local working set. It does not manage dynamic subsets or overlapping query keys; bound the fetch closure itself, for example by project or account, when the server table is large.
 
 ## Electric-Backed Collection
 

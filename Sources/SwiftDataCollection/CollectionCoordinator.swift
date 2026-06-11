@@ -478,6 +478,7 @@ actor CollectionCoordinator<
                     pendingMutationCount: pendingMutations.count,
                     message: "awaiting adapter refresh completion"
                 )
+                await adapterRuntime.refresh()
             }
         } catch {
             transactionRecord.markFailed(error, retryPolicy: retryPolicy)

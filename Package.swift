@@ -17,6 +17,10 @@ let package = Package(
             name: "ElectricSwiftDataCollection",
             targets: ["ElectricSwiftDataCollection"]
         ),
+        .library(
+            name: "FetchSwiftDataCollection",
+            targets: ["FetchSwiftDataCollection"]
+        ),
     ],
     dependencies: [
         .package(url: "https://github.com/casvandergun/electric-swift.git", exact: "0.1.0"),
@@ -34,9 +38,14 @@ let package = Package(
             ],
             path: "Sources/Adapters/ElectricSwiftDataCollection"
         ),
+        .target(
+            name: "FetchSwiftDataCollection",
+            dependencies: ["SwiftDataCollection"],
+            path: "Sources/Adapters/FetchSwiftDataCollection"
+        ),
         .testTarget(
             name: "SwiftDataCollectionTests",
-            dependencies: ["SwiftDataCollection", "ElectricSwiftDataCollection"],
+            dependencies: ["SwiftDataCollection", "ElectricSwiftDataCollection", "FetchSwiftDataCollection"],
             path: "Tests/SwiftDataCollectionTests"
         ),
     ]
