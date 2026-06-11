@@ -302,44 +302,6 @@ public extension SwiftDataCollectionStore {
         )
     }
 
-    func collection<Model: SwiftDataCollectionModel, ID: Hashable & Sendable>(
-        _ model: Model.Type,
-        identifier: CollectionModelIdentifier<Model, ID>,
-        shapeURL: URL,
-        table: String,
-        shapeID: String? = nil,
-        columns: [String] = [],
-        where whereClause: String? = nil,
-        replica: ElectricReplica = .default,
-        headers: [String: String] = [:],
-        extraParameters: [String: String] = [:],
-        debugName: String? = nil,
-        utilities: ElectricCollectionSyncUtilities = ElectricCollectionSyncUtilities(),
-        onInsert: ElectricMutationHandler<Model, ID>? = nil,
-        onUpdate: ElectricMutationHandler<Model, ID>? = nil,
-        onDelete: ElectricMutationHandler<Model, ID>? = nil
-    ) async throws -> SwiftDataCollection<Model, ID> {
-        try await collection(
-            model,
-            options: electricCollectionOptions(
-                debugName: debugName,
-                identifier: identifier,
-                shapeURL: shapeURL,
-                table: table,
-                shapeID: shapeID,
-                columns: columns,
-                where: whereClause,
-                replica: replica,
-                headers: headers,
-                extraParameters: extraParameters,
-                utilities: utilities,
-                onInsert: onInsert,
-                onUpdate: onUpdate,
-                onDelete: onDelete
-            )
-        )
-    }
-
     func shape<Model: SwiftDataCollectionModel, ID: Hashable & Sendable>(
         _ model: Model.Type,
         identifier: CollectionModelIdentifier<Model, ID>,

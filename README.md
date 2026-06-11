@@ -100,21 +100,23 @@ let todoIdentifier = CollectionModelIdentifier<Todo, String>.string(
 
 let todos = try await store.collection(
     Todo.self,
-    identifier: todoIdentifier,
-    shapeURL: URL(string: "http://localhost:3000/v1/shape")!,
-    table: "todos",
-    where: "project_id = 'abc'",
-    onUpdate: { context in
-        var txids = Set<Int64>()
-        for mutation in context.mutations {
-            let response = try await api.todos.update(
-                id: mutation.key,
-                changes: mutation.changes
-            )
-            txids.insert(response.txid)
+    options: electricCollectionOptions(
+        identifier: todoIdentifier,
+        shapeURL: URL(string: "http://localhost:3000/v1/shape")!,
+        table: "todos",
+        where: "project_id = 'abc'",
+        onUpdate: { context in
+            var txids = Set<Int64>()
+            for mutation in context.mutations {
+                let response = try await api.todos.update(
+                    id: mutation.key,
+                    changes: mutation.changes
+                )
+                txids.insert(response.txid)
+            }
+            return .txids(txids)
         }
-        return .txids(txids)
-    }
+    )
 )
 
 await todos.start()

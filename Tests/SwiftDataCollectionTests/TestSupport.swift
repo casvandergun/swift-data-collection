@@ -68,19 +68,21 @@ extension SwiftDataCollectionStore {
     ) async throws -> SwiftDataCollection<Model, ID> {
         try await collection(
             model,
-            identifier: identifier,
-            shapeURL: testElectricCollectionShapeURL,
-            table: table,
-            shapeID: shapeID,
-            columns: columns,
-            where: whereClause,
-            replica: replica,
-            headers: headers,
-            extraParameters: extraParameters,
-            debugName: debugName,
-            onInsert: onInsert,
-            onUpdate: onUpdate,
-            onDelete: onDelete
+            options: electricCollectionOptions(
+                debugName: debugName,
+                identifier: identifier,
+                shapeURL: testElectricCollectionShapeURL,
+                table: table,
+                shapeID: shapeID,
+                columns: columns,
+                where: whereClause,
+                replica: replica,
+                headers: headers,
+                extraParameters: extraParameters,
+                onInsert: onInsert,
+                onUpdate: onUpdate,
+                onDelete: onDelete
+            )
         )
     }
 
