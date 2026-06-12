@@ -31,6 +31,7 @@ public struct ElectricCollectionOptions<Model: SwiftDataCollectionModel, ID: Has
     public let headers: [String: String]
     public let extraParameters: [String: String]
     public let utilities: ElectricCollectionSyncUtilities
+    public let onBatchApplied: CollectionBatchAppliedHandler?
     public let onInsert: ElectricMutationHandler<Model, ID>?
     public let onUpdate: ElectricMutationHandler<Model, ID>?
     public let onDelete: ElectricMutationHandler<Model, ID>?
@@ -48,6 +49,7 @@ public struct ElectricCollectionOptions<Model: SwiftDataCollectionModel, ID: Has
         headers: [String: String] = [:],
         extraParameters: [String: String] = [:],
         utilities: ElectricCollectionSyncUtilities = ElectricCollectionSyncUtilities(),
+        onBatchApplied: CollectionBatchAppliedHandler? = nil,
         onInsert: ElectricMutationHandler<Model, ID>? = nil,
         onUpdate: ElectricMutationHandler<Model, ID>? = nil,
         onDelete: ElectricMutationHandler<Model, ID>? = nil
@@ -69,6 +71,7 @@ public struct ElectricCollectionOptions<Model: SwiftDataCollectionModel, ID: Has
         self.headers = headers
         self.extraParameters = extraParameters
         self.utilities = utilities
+        self.onBatchApplied = onBatchApplied
         self.onInsert = onInsert
         self.onUpdate = onUpdate
         self.onDelete = onDelete
@@ -95,6 +98,7 @@ public struct ElectricCollectionOptions<Model: SwiftDataCollectionModel, ID: Has
             identifier: identifier,
             modelName: modelName,
             adapter: adapter,
+            onBatchApplied: onBatchApplied,
             onInsert: Self.wrap(onInsert),
             onUpdate: Self.wrap(onUpdate),
             onDelete: Self.wrap(onDelete)
@@ -145,6 +149,7 @@ public func electricCollectionOptions<Model: SwiftDataCollectionModel, ID: Hasha
     headers: [String: String] = [:],
     extraParameters: [String: String] = [:],
     utilities: ElectricCollectionSyncUtilities = ElectricCollectionSyncUtilities(),
+    onBatchApplied: CollectionBatchAppliedHandler? = nil,
     onInsert: ElectricMutationHandler<Model, ID>? = nil,
     onUpdate: ElectricMutationHandler<Model, ID>? = nil,
     onDelete: ElectricMutationHandler<Model, ID>? = nil
@@ -161,6 +166,7 @@ public func electricCollectionOptions<Model: SwiftDataCollectionModel, ID: Hasha
         headers: headers,
         extraParameters: extraParameters,
         utilities: utilities,
+        onBatchApplied: onBatchApplied,
         onInsert: onInsert,
         onUpdate: onUpdate,
         onDelete: onDelete
@@ -227,7 +233,17 @@ actor ElectricCollectionAdapterRuntime<
             headers: configuration.headers,
             extraParameters: configuration.extraParameters,
             batchApplier: { batch, shapeID, modelContext in
-                try synchronizer.apply(batch, shapeID: shapeID, in: modelContext)
+                let result = try synchronizer.apply(batch, shapeID: shapeID, in: modelContext)
+                let summary = CollectionBatchApplySummary(
+                    collectionIdentifier: context.collectionID,
+                    sourceIdentifier: context.sourceID,
+                    insertedCount: result.insertedCount,
+                    updatedCount: result.updatedCount,
+                    deletedCount: result.deletedCount,
+                    observedTXIDs: result.observedTXIDs
+                )
+                try context.onBatchApplied?(modelContext, summary)
+                return result
             }
         )
 
@@ -262,6 +278,10 @@ actor ElectricCollectionAdapterRuntime<
         let observedTokens = Set(batch.messages.flatMap { $0.headers.txids ?? [] }.map(String.init))
         await reportApplied(observedTokens, batch.state.lastSyncedAt, batch.state.offset)
         await utilities.observeAppliedBatch(batch)
+    }
+
+    func shapeStoreDidFail(shapeID _: String, error: Error) async {
+        await reportError(error)
     }
 }
 
@@ -301,6 +321,8 @@ public extension SwiftDataCollectionStore {
             offset: batch.state.offset
         )
     }
+
+    func shapeStoreDidFail(shapeID _: String, error _: Error) async {}
 
     func shape<Model: SwiftDataCollectionModel, ID: Hashable & Sendable>(
         _ model: Model.Type,

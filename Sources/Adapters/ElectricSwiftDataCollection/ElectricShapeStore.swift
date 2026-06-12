@@ -17,6 +17,11 @@ public protocol ElectricShapeStoreObserver: Actor {
         shapeID: String,
         resolvedTransactionIDs: [UUID]
     ) async
+
+    func shapeStoreDidFail(
+        shapeID: String,
+        error: Error
+    ) async
 }
 
 public actor ElectricShapeStore {
@@ -301,6 +306,9 @@ public actor ElectricShapeStore {
                     state: state,
                     shapeID: shapeID
                 )
+                if let observer {
+                    await observer.shapeStoreDidFail(shapeID: shapeID, error: error)
+                }
                 self.clearTask(shapeID: shapeID)
             }
         }

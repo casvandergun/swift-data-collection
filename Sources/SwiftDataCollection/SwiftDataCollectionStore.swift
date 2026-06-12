@@ -129,7 +129,10 @@ public actor SwiftDataCollectionStore {
                 )
             }
 
-            guard options.onInsert == nil, options.onUpdate == nil, options.onDelete == nil else {
+            guard options.onBatchApplied == nil,
+                  options.onInsert == nil,
+                  options.onUpdate == nil,
+                  options.onDelete == nil else {
                 throw SwiftDataCollectionStoreError.managedShapeConflict(
                     modelName: options.modelName,
                     existingKind: existing.kind,
@@ -235,6 +238,7 @@ public actor SwiftDataCollectionStore {
             rowDecoder: rowDecoder,
             debugLogger: debugLogger,
             writeTracer: writeTracer,
+            onBatchApplied: options.onBatchApplied,
             reportApplied: { observedTokens, lastSyncedAt, offset in
                 await relay.reportApplied(
                     observedTokens: observedTokens,

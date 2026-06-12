@@ -294,6 +294,7 @@ struct ElectricDatabaseReconciliationTests {
         } catch {
             Issue.record("Expected managedShapeConflict, got \(error)")
         }
+
     }
 
     @Test("Shape then collection for the same model conflicts")
@@ -363,6 +364,27 @@ struct ElectricDatabaseReconciliationTests {
                 onDelete: { _ in ElectricMutationSubmission(awaitedTXIDs: [202]) }
             )
             Issue.record("Expected duplicate collection with handlers to conflict")
+        } catch ElectricCollectionStoreError.managedShapeConflict(
+            _,
+            let existingKind,
+            _,
+            let requestedKind,
+            _
+        ) {
+            #expect(existingKind == .collection)
+            #expect(requestedKind == .collection)
+        } catch {
+            Issue.record("Expected managedShapeConflict, got \(error)")
+        }
+
+        do {
+            _ = try await database.collection(
+                TestTodo.self,
+                identifier: testTodoIdentifier,
+                table: "todos",
+                onBatchApplied: { _, _ in }
+            )
+            Issue.record("Expected duplicate collection with batch callback to conflict")
         } catch ElectricCollectionStoreError.managedShapeConflict(
             _,
             let existingKind,

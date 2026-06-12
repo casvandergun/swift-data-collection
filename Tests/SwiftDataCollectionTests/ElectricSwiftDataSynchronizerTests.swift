@@ -199,20 +199,20 @@ struct ElectricSwiftDataBatchApplicationTests {
         let context = ModelContext(container)
         let synchronizer = ElectricSwiftDataRowApplier(identifier: testTodoIdentifier)
 
-        _ = try synchronizer.apply(
+        let result = try synchronizer.apply(
             ShapeBatch(
                 messages: [
                     ElectricMessage(
                         key: "\"public\".\"todos\"/todo-1",
                         value: testTodoRow(id: "todo-1", projectID: "project-a", title: "Initial"),
-                        headers: .init(operation: .insert)
+                        headers: .init(operation: .insert, txids: [5, 3])
                     ),
                     ElectricMessage(
                         key: "\"public\".\"todos\"/todo-1",
                         value: [
                             "title": .string("Renamed"),
                         ],
-                        headers: .init(operation: .update)
+                        headers: .init(operation: .update, txids: [3])
                     ),
                     ElectricMessage(
                         key: "\"public\".\"todos\"/todo-1",
@@ -235,6 +235,10 @@ struct ElectricSwiftDataBatchApplicationTests {
         #expect(updated.id == "todo-1")
         #expect(updated.projectID == "project-b")
         #expect(updated.title == "Renamed")
+        #expect(result.insertedCount == 1)
+        #expect(result.updatedCount == 2)
+        #expect(result.deletedCount == 0)
+        #expect(result.observedTXIDs == [3, 5])
     }
 
     @Test("Sparse update preserves required untouched fields in collection synchronizer")

@@ -6,10 +6,22 @@ import SwiftDataCollection
 public struct ElectricShapeApplyResult: Sendable, Hashable {
     public let resolvedTransactionIDs: [UUID]
     public let observedTXIDs: [Int64]
+    public let insertedCount: Int
+    public let updatedCount: Int
+    public let deletedCount: Int
 
-    public init(resolvedTransactionIDs: [UUID] = [], observedTXIDs: [Int64] = []) {
+    public init(
+        resolvedTransactionIDs: [UUID] = [],
+        observedTXIDs: [Int64] = [],
+        insertedCount: Int = 0,
+        updatedCount: Int = 0,
+        deletedCount: Int = 0
+    ) {
         self.resolvedTransactionIDs = resolvedTransactionIDs
-        self.observedTXIDs = observedTXIDs
+        self.observedTXIDs = Array(Set(observedTXIDs)).sorted()
+        self.insertedCount = insertedCount
+        self.updatedCount = updatedCount
+        self.deletedCount = deletedCount
     }
 }
 
@@ -42,14 +54,19 @@ public struct ElectricSwiftDataRowApplier<Model: SwiftDataCollectionModel, ID: H
         shapeID: String,
         in context: ModelContext
     ) throws -> ElectricShapeApplyResult {
+        var insertedCount = 0
+        var updatedCount = 0
+        var deletedCount = 0
+
         if batch.messages.contains(where: { $0.headers.control == .mustRefetch }) {
-            let deletedCount = try deleteRefetchableModels(in: context)
+            let refetchDeletedCount = try deleteRefetchableModels(in: context)
+            deletedCount += refetchDeletedCount
             logApply(
                 shapeID: shapeID,
                 message: "cleared refetchable models",
                 metadata: [
                     "modelName": modelName,
-                    "deletedCount": String(deletedCount),
+                    "deletedCount": String(refetchDeletedCount),
                     "offset": batch.state.offset,
                 ]
             )
@@ -74,6 +91,12 @@ public struct ElectricSwiftDataRowApplier<Model: SwiftDataCollectionModel, ID: H
                     row: row,
                     in: context
                 )
+                switch outcome {
+                case .inserted:
+                    insertedCount += 1
+                case .updated, .mergedPatch:
+                    updatedCount += 1
+                }
                 logApply(
                     shapeID: shapeID,
                     message: outcome == .mergedPatch ? "merged patch into existing model" : "applied row mutation",
@@ -94,6 +117,9 @@ public struct ElectricSwiftDataRowApplier<Model: SwiftDataCollectionModel, ID: H
                     continue
                 }
                 let deleted = try applyDelete(key: key, in: context)
+                if deleted {
+                    deletedCount += 1
+                }
                 logApply(
                     shapeID: shapeID,
                     message: deleted ? "deleted model from SwiftData" : "delete skipped; model not found",
@@ -132,7 +158,10 @@ public struct ElectricSwiftDataRowApplier<Model: SwiftDataCollectionModel, ID: H
         try context.save()
         let result = ElectricShapeApplyResult(
             resolvedTransactionIDs: [],
-            observedTXIDs: Array(Set(batch.messages.flatMap { $0.headers.txids ?? [] }))
+            observedTXIDs: batch.messages.flatMap { $0.headers.txids ?? [] },
+            insertedCount: insertedCount,
+            updatedCount: updatedCount,
+            deletedCount: deletedCount
         )
         logApply(
             shapeID: shapeID,

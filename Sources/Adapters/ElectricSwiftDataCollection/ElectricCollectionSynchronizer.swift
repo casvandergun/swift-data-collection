@@ -11,6 +11,22 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
     let writeTracer: CollectionWriteTracer
     let debugLogger: ElectricDebugLogger
 
+    private enum UpsertChange {
+        case inserted
+        case updated
+        case none
+    }
+
+    private struct UpsertOutcome {
+        let resolvedTransactionIDs: Set<UUID>
+        let change: UpsertChange
+    }
+
+    private struct DeleteOutcome {
+        let resolvedTransactionIDs: Set<UUID>
+        let deleted: Bool
+    }
+
     init(
         identifier: CollectionModelIdentifier<Model, ID>,
         rowDecoder: CollectionRowDecoder = .init(),
@@ -34,16 +50,20 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
     ) throws -> ElectricShapeApplyResult {
         var resolvedTransactionIDs = Set<UUID>()
         let observedTXIDs = Set(batch.messages.flatMap { $0.headers.txids ?? [] })
+        var insertedCount = 0
+        var updatedCount = 0
+        var deletedCount = 0
 
         if batch.messages.contains(where: { $0.headers.control == .mustRefetch }) {
-            let deletedCount = try deleteRefetchableModels(in: context)
+            let refetchDeletedCount = try deleteRefetchableModels(in: context)
+            deletedCount += refetchDeletedCount
             logApply(
                 "cleared refetchable models",
                 metadata: [
                     "shapeID": shapeID,
                     "modelName": modelName,
                     "collectionID": collectionID ?? "",
-                    "deletedCount": String(deletedCount),
+                    "deletedCount": String(refetchDeletedCount),
                     "offset": batch.state.offset,
                 ]
             )
@@ -63,33 +83,42 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
                     logSkip(message, shapeID: shapeID, offset: batch.state.offset, reason: "missing key or value")
                     continue
                 }
-                resolvedTransactionIDs.formUnion(
-                    try applyUpsert(
-                        operation: operation,
-                        key: key,
-                        row: row,
-                        txids: txids,
-                        message: message,
-                        shapeID: shapeID,
-                        batchState: batch.state,
-                        in: context
-                    )
+                let outcome = try applyUpsert(
+                    operation: operation,
+                    key: key,
+                    row: row,
+                    txids: txids,
+                    message: message,
+                    shapeID: shapeID,
+                    batchState: batch.state,
+                    in: context
                 )
+                resolvedTransactionIDs.formUnion(outcome.resolvedTransactionIDs)
+                switch outcome.change {
+                case .inserted:
+                    insertedCount += 1
+                case .updated:
+                    updatedCount += 1
+                case .none:
+                    break
+                }
             case .delete:
                 guard let key else {
                     logSkip(message, shapeID: shapeID, offset: batch.state.offset, reason: "missing key")
                     continue
                 }
-                resolvedTransactionIDs.formUnion(
-                    try applyDelete(
-                        key: key,
-                        txids: txids,
-                        message: message,
-                        shapeID: shapeID,
-                        offset: batch.state.offset,
-                        in: context
-                    )
+                let outcome = try applyDelete(
+                    key: key,
+                    txids: txids,
+                    message: message,
+                    shapeID: shapeID,
+                    offset: batch.state.offset,
+                    in: context
                 )
+                resolvedTransactionIDs.formUnion(outcome.resolvedTransactionIDs)
+                if outcome.deleted {
+                    deletedCount += 1
+                }
             }
         }
 
@@ -114,7 +143,10 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
         try context.save()
         let result = ElectricShapeApplyResult(
             resolvedTransactionIDs: Array(resolvedTransactionIDs),
-            observedTXIDs: Array(observedTXIDs)
+            observedTXIDs: Array(observedTXIDs),
+            insertedCount: insertedCount,
+            updatedCount: updatedCount,
+            deletedCount: deletedCount
         )
         logApply(
             "saved collection-aware SwiftData batch",
@@ -140,7 +172,7 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
         shapeID: String,
         batchState: ShapeStreamState,
         in context: ModelContext
-    ) throws -> Set<UUID> {
+    ) throws -> UpsertOutcome {
         let resolvedTransactionIDs = resolveAwaitingMutations(
             modelName: modelName,
             targetKey: key,
@@ -165,7 +197,7 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
                     ]
                 )
             )
-            return resolvedTransactionIDs
+            return UpsertOutcome(resolvedTransactionIDs: resolvedTransactionIDs, change: .none)
         }
 
         let protectedFields = Set(
@@ -225,7 +257,7 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
                     )
                 )
             }
-            return resolvedTransactionIDs
+            return UpsertOutcome(resolvedTransactionIDs: resolvedTransactionIDs, change: .updated)
         }
 
         let collectionRow = CollectionRow(electricRow: row)
@@ -274,7 +306,7 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
             )
         }
         context.insert(model)
-        return resolvedTransactionIDs
+        return UpsertOutcome(resolvedTransactionIDs: resolvedTransactionIDs, change: .inserted)
     }
 
     private func applyDelete(
@@ -284,7 +316,7 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
         shapeID: String,
         offset: String,
         in context: ModelContext
-    ) throws -> Set<UUID> {
+    ) throws -> DeleteOutcome {
         let resolvedTransactionIDs = resolveAwaitingMutations(
             modelName: modelName,
             targetKey: key,
@@ -309,11 +341,13 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
                     ]
                 )
             )
-            return resolvedTransactionIDs
+            return DeleteOutcome(resolvedTransactionIDs: resolvedTransactionIDs, deleted: false)
         }
 
+        var deleted = false
         if pending.isEmpty, let existing = try fetchModel(key: key, in: context) {
             context.delete(existing)
+            deleted = true
             logApply(
                 "deleted model from SwiftData",
                 metadata: messageMetadata(
@@ -345,7 +379,7 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
                 )
             )
         }
-        return resolvedTransactionIDs
+        return DeleteOutcome(resolvedTransactionIDs: resolvedTransactionIDs, deleted: deleted)
     }
 
     private func resolveAwaitingMutations(

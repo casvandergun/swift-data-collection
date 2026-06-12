@@ -62,6 +62,7 @@ extension SwiftDataCollectionStore {
         headers: [String: String] = [:],
         extraParameters: [String: String] = [:],
         debugName: String? = nil,
+        onBatchApplied: CollectionBatchAppliedHandler? = nil,
         onInsert: ElectricMutationHandler<Model, ID>? = nil,
         onUpdate: ElectricMutationHandler<Model, ID>? = nil,
         onDelete: ElectricMutationHandler<Model, ID>? = nil
@@ -79,6 +80,7 @@ extension SwiftDataCollectionStore {
                 replica: replica,
                 headers: headers,
                 extraParameters: extraParameters,
+                onBatchApplied: onBatchApplied,
                 onInsert: onInsert,
                 onUpdate: onUpdate,
                 onDelete: onDelete
@@ -109,6 +111,31 @@ extension SwiftDataCollectionStore {
             headers: headers,
             extraParameters: extraParameters
         )
+    }
+}
+
+final class TestBatchAppliedRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedSummaries: [CollectionBatchApplySummary] = []
+    private var storedRowCounts: [Int] = []
+
+    func record(summary: CollectionBatchApplySummary, rowCount: Int) {
+        lock.lock()
+        storedSummaries.append(summary)
+        storedRowCounts.append(rowCount)
+        lock.unlock()
+    }
+
+    func summaries() -> [CollectionBatchApplySummary] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedSummaries
+    }
+
+    func rowCounts() -> [Int] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedRowCounts
     }
 }
 

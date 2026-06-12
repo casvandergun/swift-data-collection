@@ -287,7 +287,7 @@ struct FetchSwiftDataCollectionTests {
         )
         try context.save()
 
-        try makeTestFetchApplier().apply(
+        _ = try makeTestFetchApplier().apply(
             [
                 testTodoCollectionRow(id: "todo-1", projectID: "server-project", title: "Server"),
             ],
@@ -319,7 +319,7 @@ struct FetchSwiftDataCollectionTests {
         )
         try context.save()
 
-        try makeTestFetchApplier().apply(
+        _ = try makeTestFetchApplier().apply(
             [
                 testTodoCollectionRow(id: "todo-1", projectID: "server-project", title: "Server"),
             ],
@@ -352,7 +352,7 @@ struct FetchSwiftDataCollectionTests {
         )
         try context.save()
 
-        try makeTestFetchApplier().apply(
+        _ = try makeTestFetchApplier().apply(
             [
                 testTodoCollectionRow(id: "todo-1", projectID: "server-project", title: "Server"),
             ],
@@ -390,6 +390,78 @@ struct FetchSwiftDataCollectionTests {
         let fetched = try context.fetch(FetchDescriptor<TestTodo>())
         #expect(fetched.count == 1)
         #expect(fetched.first?.title == "One")
+    }
+
+    @Test("Batch applied callback runs after snapshot save and persists explicit follow-up changes")
+    func batchAppliedCallbackRunsAfterSnapshotSaveAndPersistsExplicitChanges() async throws {
+        let rows = TestFetchRows([
+            testTodoCollectionRow(id: "todo-1", title: "One"),
+            testTodoCollectionRow(id: "todo-2", title: "Two"),
+        ])
+        let recorder = TestBatchAppliedRecorder()
+        let container = try makeTestContainer()
+        let store = SwiftDataCollectionStore(modelContainer: container)
+        let collection = try await store.collection(
+            TestTodo.self,
+            options: fetchCollectionOptions(
+                scopeID: "all",
+                identifier: testTodoIdentifier,
+                fetch: { _ in await rows.all() },
+                onBatchApplied: { context, summary in
+                    let currentRows = try context.fetch(FetchDescriptor<TestTodo>())
+                    recorder.record(summary: summary, rowCount: currentRows.count)
+                    if let first = currentRows.first(where: { $0.id == "todo-1" }) {
+                        first.title = "Hydrated"
+                    }
+                    try context.save()
+                }
+            )
+        )
+
+        await collection.start()
+
+        let context = ModelContext(container)
+        let hydrated = try #require(context.fetch(testTodoIdentifier.fetchDescriptor(for: "todo-1")).first)
+        let summary = try #require(recorder.summaries().first)
+        #expect(hydrated.title == "Hydrated")
+        #expect(recorder.rowCounts() == [2])
+        #expect(summary.collectionIdentifier == "\(String(reflecting: TestTodo.self)):\(collection.sourceID)")
+        #expect(summary.sourceIdentifier == collection.sourceID)
+        #expect(summary.insertedCount == 2)
+        #expect(summary.updatedCount == 0)
+        #expect(summary.deletedCount == 0)
+        #expect(summary.observedTXIDs == [])
+    }
+
+    @Test("Throwing batch applied callback reports collection error")
+    func throwingBatchAppliedCallbackReportsCollectionError() async throws {
+        enum SampleError: Error { case hydrationFailed }
+
+        let rows = TestFetchRows([
+            testTodoCollectionRow(id: "todo-1", title: "One"),
+        ])
+        let container = try makeTestContainer()
+        let store = SwiftDataCollectionStore(modelContainer: container)
+        let collection = try await store.collection(
+            TestTodo.self,
+            options: fetchCollectionOptions(
+                scopeID: "all",
+                identifier: testTodoIdentifier,
+                fetch: { _ in await rows.all() },
+                onBatchApplied: { _, _ in
+                    throw SampleError.hydrationFailed
+                }
+            )
+        )
+
+        await collection.start()
+
+        switch await collection.status {
+        case .error(let message):
+            #expect(message.contains("hydrationFailed"))
+        case let status:
+            Issue.record("Expected callback failure to report collection error, got \(status)")
+        }
     }
 
     @Test("Fetch adapter source id includes scope id")

@@ -9,8 +9,11 @@ actor FetchCollectionAdapterRuntime<
     private let configuration: FetchCollectionOptions<Model, ID>
     private let modelContainer: ModelContainer
     private let context: FetchCollectionContext<Model, ID>
+    private let collectionID: String
+    private let sourceID: String
     private let identifier: CollectionModelIdentifier<Model, ID>
     private let rowDecoder: CollectionRowDecoder
+    private let onBatchApplied: CollectionBatchAppliedHandler?
     private let reportRefreshCompleted: @Sendable (Date?) async -> Void
     private let reportError: @Sendable (Error) async -> Void
 
@@ -25,8 +28,11 @@ actor FetchCollectionAdapterRuntime<
             modelName: configuration.modelName,
             scopeID: configuration.scopeID
         )
+        self.collectionID = context.collectionID
+        self.sourceID = context.sourceID
         self.identifier = context.identifier
         self.rowDecoder = context.rowDecoder
+        self.onBatchApplied = context.onBatchApplied
         self.reportRefreshCompleted = context.reportRefreshCompleted
         self.reportError = context.reportError
     }
@@ -47,7 +53,15 @@ actor FetchCollectionAdapterRuntime<
                 modelName: configuration.modelName,
                 missingRowPolicy: configuration.missingRowPolicy
             )
-            try applier.apply(rows, in: modelContext)
+            let result = try applier.apply(rows, in: modelContext)
+            let summary = CollectionBatchApplySummary(
+                collectionIdentifier: collectionID,
+                sourceIdentifier: sourceID,
+                insertedCount: result.insertedCount,
+                updatedCount: result.updatedCount,
+                deletedCount: result.deletedCount
+            )
+            try onBatchApplied?(modelContext, summary)
             await reportRefreshCompleted(Date())
         } catch {
             await reportError(error)
@@ -64,13 +78,22 @@ struct FetchCollectionSnapshotApplier<
     let modelName: String
     let missingRowPolicy: FetchMissingRowPolicy
 
+    struct ApplyResult: Sendable, Hashable {
+        let insertedCount: Int
+        let updatedCount: Int
+        let deletedCount: Int
+    }
+
     func apply(
         _ rows: [CollectionRow],
         in context: ModelContext
-    ) throws {
+    ) throws -> ApplyResult {
         let existingModels = try context.fetch(FetchDescriptor<Model>())
         let unresolvedMutations = unresolvedMutationsByKey(in: context)
         var returnedKeys = Set<String>()
+        var insertedCount = 0
+        var updatedCount = 0
+        var deletedCount = 0
 
         for row in rows {
             let decoded = try Model(collectionRow: row, decoder: rowDecoder)
@@ -81,11 +104,13 @@ struct FetchCollectionSnapshotApplier<
 
             returnedKeys.insert(key)
             if let existing = try fetchModel(key: key, in: context) {
-                try applyFetchedRow(
+                if try applyFetchedRow(
                     row,
                     to: existing,
                     pending: unresolvedMutations[key] ?? []
-                )
+                ) {
+                    updatedCount += 1
+                }
             } else {
                 let pending = unresolvedMutations[key] ?? []
                 guard pending.contains(where: { $0.operation == .delete }) == false else {
@@ -94,6 +119,7 @@ struct FetchCollectionSnapshotApplier<
                 try applyPendingMutationPayloads(to: decoded, pending: pending)
                 refreshSyncState(for: decoded, pending: pending)
                 context.insert(decoded)
+                insertedCount += 1
             }
         }
 
@@ -105,6 +131,7 @@ struct FetchCollectionSnapshotApplier<
                 let pending = unresolvedMutations[key] ?? []
                 if pending.isEmpty {
                     context.delete(model)
+                    deletedCount += 1
                 } else {
                     refreshSyncState(for: model, pending: pending)
                 }
@@ -121,6 +148,11 @@ struct FetchCollectionSnapshotApplier<
         }
 
         try context.save()
+        return ApplyResult(
+            insertedCount: insertedCount,
+            updatedCount: updatedCount,
+            deletedCount: deletedCount
+        )
     }
 
     private func fetchModel(key: String, in context: ModelContext) throws -> Model? {
@@ -131,18 +163,18 @@ struct FetchCollectionSnapshotApplier<
         _ row: CollectionRow,
         to model: Model,
         pending: [PendingCollectionMutation]
-    ) throws {
+    ) throws -> Bool {
         guard pending.isEmpty == false else {
             try model.apply(collectionRow: row, decoder: rowDecoder)
             model.collectionPendingMutationCount = 0
             model.collectionSyncState = .synced
-            return
+            return true
         }
 
         if pending.contains(where: { $0.status == .failed }) ||
             pending.contains(where: { $0.operation == .delete }) {
             refreshSyncState(for: model, pending: pending)
-            return
+            return false
         }
 
         let protectedFields = protectedPendingFields(pending)
@@ -153,6 +185,7 @@ struct FetchCollectionSnapshotApplier<
         )
         try model.apply(collectionRow: merged, decoder: rowDecoder)
         refreshSyncState(for: model, pending: pending)
+        return true
     }
 
     private func applyPendingMutationPayloads(
