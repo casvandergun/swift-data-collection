@@ -6,6 +6,7 @@ public enum CollectionValue: Sendable, Hashable, Codable {
     case integer(Int64)
     case double(Double)
     case boolean(Bool)
+    case date(Date)
     case object([String: CollectionValue])
     case array([CollectionValue])
     case null
@@ -16,6 +17,8 @@ public enum CollectionValue: Sendable, Hashable, Codable {
             self = .null
         } else if let value = try? container.decode(Bool.self) {
             self = .boolean(value)
+        } else if let value = try? container.decode(CollectionDateValue.self), value.isDateMarker {
+            self = .date(Date(timeIntervalSince1970: value.secondsSince1970))
         } else if let value = try? container.decode([String: CollectionValue].self) {
             self = .object(value)
         } else if let value = try? container.decode([CollectionValue].self) {
@@ -40,6 +43,8 @@ public enum CollectionValue: Sendable, Hashable, Codable {
             try container.encode(value)
         case .boolean(let value):
             try container.encode(value)
+        case .date(let value):
+            try container.encode(CollectionDateValue(date: value))
         case .object(let value):
             try container.encode(value)
         case .array(let value):
@@ -51,6 +56,72 @@ public enum CollectionValue: Sendable, Hashable, Codable {
 }
 
 public typealias CollectionRow = [String: CollectionValue]
+
+private struct CollectionDateValue: Codable {
+    let marker: String
+    let secondsSince1970: Double
+
+    var isDateMarker: Bool {
+        marker == "date"
+    }
+
+    init(date: Date) {
+        self.marker = "date"
+        self.secondsSince1970 = date.timeIntervalSince1970
+    }
+
+    enum CodingKeys: String, CodingKey, CaseIterable {
+        case marker = "__swiftDataCollectionValueType"
+        case secondsSince1970
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        guard Set(container.allKeys) == Set(CodingKeys.allCases) else {
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: decoder.codingPath, debugDescription: "Not a collection date marker")
+            )
+        }
+        marker = try container.decode(String.self, forKey: .marker)
+        secondsSince1970 = try container.decode(Double.self, forKey: .secondsSince1970)
+    }
+}
+
+public enum CollectionRowValueError: Error, Sendable, Hashable {
+    case missingRequiredValue(String)
+    case typeMismatch(String, expected: String)
+}
+
+public extension CollectionValue {
+    var dateValue: Date? {
+        guard case .date(let value) = self else { return nil }
+        return value
+    }
+}
+
+public extension Dictionary where Key == String, Value == CollectionValue {
+    func requiredDate(_ key: String) throws -> Date {
+        guard let value = self[key] else {
+            throw CollectionRowValueError.missingRequiredValue(key)
+        }
+        guard case .date(let date) = value else {
+            throw CollectionRowValueError.typeMismatch(key, expected: "Date")
+        }
+        return date
+    }
+
+    func optionalDate(_ key: String) throws -> Date? {
+        guard let value = self[key] else { return nil }
+        switch value {
+        case .date(let date):
+            return date
+        case .null:
+            return nil
+        default:
+            throw CollectionRowValueError.typeMismatch(key, expected: "Date")
+        }
+    }
+}
 
 public struct CollectionRowDecoder: Sendable {
     private let makeDecoder: @Sendable () -> JSONDecoder
@@ -66,8 +137,75 @@ public struct CollectionRowDecoder: Sendable {
 
     public func decode<T: Decodable>(_ type: T.Type, from row: CollectionRow) throws -> T {
         let encoder = makeEncoder()
-        let data = try encoder.encode(row)
+        let data = try encoder.encode(CollectionRowModelProjection(row: row))
         return try makeDecoder().decode(T.self, from: data)
+    }
+}
+
+private struct CollectionRowModelProjection: Encodable {
+    let row: CollectionRow
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: DynamicCodingKey.self)
+        for (key, value) in row {
+            try container.encode(CollectionValueModelProjection(value: value), forKey: DynamicCodingKey(key))
+        }
+    }
+}
+
+private struct CollectionValueModelProjection: Encodable {
+    let value: CollectionValue
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch value {
+        case .string(let value):
+            try container.encode(value)
+        case .integer(let value):
+            try container.encode(value)
+        case .double(let value):
+            try container.encode(value)
+        case .boolean(let value):
+            try container.encode(value)
+        case .date(let value):
+            try container.encode(value)
+        case .object(let value):
+            try container.encode(CollectionObjectModelProjection(value: value))
+        case .array(let value):
+            try container.encode(value.map(CollectionValueModelProjection.init(value:)))
+        case .null:
+            try container.encodeNil()
+        }
+    }
+}
+
+private struct CollectionObjectModelProjection: Encodable {
+    let value: [String: CollectionValue]
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: DynamicCodingKey.self)
+        for (key, value) in value {
+            try container.encode(CollectionValueModelProjection(value: value), forKey: DynamicCodingKey(key))
+        }
+    }
+}
+
+private struct DynamicCodingKey: CodingKey {
+    let stringValue: String
+    let intValue: Int?
+
+    init(_ stringValue: String) {
+        self.stringValue = stringValue
+        self.intValue = nil
+    }
+
+    init?(stringValue: String) {
+        self.init(stringValue)
+    }
+
+    init?(intValue: Int) {
+        self.stringValue = String(intValue)
+        self.intValue = intValue
     }
 }
 

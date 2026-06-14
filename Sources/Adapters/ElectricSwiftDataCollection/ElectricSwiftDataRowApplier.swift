@@ -89,6 +89,7 @@ public struct ElectricSwiftDataRowApplier<Model: SwiftDataCollectionModel, ID: H
                     operation: operation,
                     key: key,
                     row: row,
+                    schema: batch.schema,
                     in: context
                 )
                 switch outcome {
@@ -181,9 +182,10 @@ public struct ElectricSwiftDataRowApplier<Model: SwiftDataCollectionModel, ID: H
         operation: ElectricOperation,
         key: String,
         row: ElectricRow,
+        schema: ElectricSchema,
         in context: ModelContext
     ) throws -> UpsertOutcome {
-        let collectionRow = CollectionRow(electricRow: row)
+        let collectionRow = CollectionRow(electricRow: row, schema: schema)
         if let existing = try fetchModel(key: key, in: context) {
             let appliedRow = if operation == .update {
                 CollectionRowPatcher.applying(patch: collectionRow, to: try existing.collectionRow())

@@ -208,7 +208,7 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
 
         if let existing = try fetchModel(key: key, in: context) {
             let localRow = try existing.collectionRow()
-            let collectionRow = CollectionRow(electricRow: row)
+            let collectionRow = CollectionRow(electricRow: row, schema: batchState.schema)
             if pending.isEmpty {
                 let appliedRow = if operation == .update {
                     CollectionRowPatcher.applying(patch: collectionRow, to: localRow)
@@ -260,7 +260,7 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
             return UpsertOutcome(resolvedTransactionIDs: resolvedTransactionIDs, change: .updated)
         }
 
-        let collectionRow = CollectionRow(electricRow: row)
+        let collectionRow = CollectionRow(electricRow: row, schema: batchState.schema)
         let merged = pending.isEmpty
             ? collectionRow
             : CollectionRowPatcher.applying(

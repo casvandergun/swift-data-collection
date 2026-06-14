@@ -192,10 +192,79 @@ private struct TestTodoValue: Decodable {
     let title: String
 }
 
+@Model
+final class TestEvent: SwiftDataCollectionModel {
+    var collectionSyncState: ElectricSyncState
+    var collectionPendingMutationCount: Int
+    var id: String
+    var title: String
+    var startTime: Date
+    var completedAt: Date?
+
+    init(
+        collectionSyncState: ElectricSyncState = .synced,
+        collectionPendingMutationCount: Int = 0,
+        id: String,
+        title: String,
+        startTime: Date,
+        completedAt: Date? = nil
+    ) {
+        self.collectionSyncState = collectionSyncState
+        self.collectionPendingMutationCount = collectionPendingMutationCount
+        self.id = id
+        self.title = title
+        self.startTime = startTime
+        self.completedAt = completedAt
+    }
+
+    convenience init(collectionRow: CollectionRow, decoder: CollectionRowDecoder) throws {
+        let value = try decoder.decode(TestEventValue.self, from: collectionRow)
+        self.init(
+            id: value.id,
+            title: value.title,
+            startTime: value.startTime,
+            completedAt: value.completedAt
+        )
+    }
+
+    func apply(collectionRow: CollectionRow, decoder: CollectionRowDecoder) throws {
+        let value = try decoder.decode(TestEventValue.self, from: collectionRow)
+        id = value.id
+        title = value.title
+        startTime = value.startTime
+        completedAt = value.completedAt
+    }
+
+    func collectionRow() throws -> CollectionRow {
+        var row: CollectionRow = [
+            "id": .string(id),
+            "title": .string(title),
+            "startTime": .date(startTime),
+        ]
+        row["completedAt"] = completedAt.map(CollectionValue.date) ?? .null
+        return row
+    }
+}
+
+private struct TestEventValue: Decodable {
+    let id: String
+    let title: String
+    let startTime: Date
+    let completedAt: Date?
+}
+
+let testEventIdentifier = CollectionModelIdentifier<TestEvent, String>.string(
+    get: \.id,
+    fetchDescriptor: { id in
+        FetchDescriptor(predicate: #Predicate<TestEvent> { $0.id == id })
+    }
+)
+
 func makeTestContainer() throws -> ModelContainer {
     let configuration = ModelConfiguration(isStoredInMemoryOnly: true)
     return try ModelContainer(
         for: TestTodo.self,
+        TestEvent.self,
         ElectricShapeMetadata.self,
         ElectricPendingMutation.self,
         ElectricPendingTransaction.self,
@@ -208,6 +277,7 @@ func makeTestContainer(storeURL: URL) throws -> ModelContainer {
     let configuration = ModelConfiguration(url: storeURL)
     return try ModelContainer(
         for: TestTodo.self,
+        TestEvent.self,
         ElectricShapeMetadata.self,
         ElectricPendingMutation.self,
         ElectricPendingTransaction.self,
@@ -331,7 +401,7 @@ func makePendingMutation(
         payloadData: try JSONEncoder().encode(CollectionRow(electricRow: payload)),
         changedFieldsData: try JSONEncoder().encode(changedFields),
         originalRowData: try originalRow.map { try JSONEncoder().encode(CollectionRow(electricRow: $0)) },
-        metadataData: try JSONEncoder().encode(metadata.mapValues(CollectionValue.init(electricValue:))),
+        metadataData: try JSONEncoder().encode(metadata.mapValues { CollectionValue(electricValue: $0) }),
         status: status
     )
 }
