@@ -155,27 +155,35 @@ import SwiftData
 final class Todo: SwiftDataCollectionModel {
     var collectionSyncState: CollectionSyncState
     var collectionPendingMutationCount: Int
-    var id: String
-    var projectID: String
+    var id: UUID
+    var projectID: UUID
     var title: String
+    var completedAt: Date?
 
     init(
         collectionSyncState: CollectionSyncState = .synced,
         collectionPendingMutationCount: Int = 0,
-        id: String,
-        projectID: String,
-        title: String
+        id: UUID,
+        projectID: UUID,
+        title: String,
+        completedAt: Date? = nil
     ) {
         self.collectionSyncState = collectionSyncState
         self.collectionPendingMutationCount = collectionPendingMutationCount
         self.id = id
         self.projectID = projectID
         self.title = title
+        self.completedAt = completedAt
     }
 
     convenience init(collectionRow: CollectionRow, decoder: CollectionRowDecoder) throws {
         let value = try decoder.decode(TodoValue.self, from: collectionRow)
-        self.init(id: value.id, projectID: value.projectID, title: value.title)
+        self.init(
+            id: value.id,
+            projectID: value.projectID,
+            title: value.title,
+            completedAt: value.completedAt
+        )
     }
 
     func apply(collectionRow: CollectionRow, decoder: CollectionRowDecoder) throws {
@@ -183,25 +191,45 @@ final class Todo: SwiftDataCollectionModel {
         id = value.id
         projectID = value.projectID
         title = value.title
+        completedAt = value.completedAt
     }
 
     func collectionRow() throws -> CollectionRow {
         [
-            "id": .string(id),
-            "projectID": .string(projectID),
+            "id": .uuid(id),
+            "projectID": .uuid(projectID),
             "title": .string(title),
+            "completedAt": .date(completedAt),
         ]
     }
 }
 
 private struct TodoValue: Decodable {
-    let id: String
-    let projectID: String
+    let id: UUID
+    let projectID: UUID
     let title: String
+    let completedAt: Date?
 }
 ```
 
 The model’s primary sync identifier must be stable, globally unique, and immutable. Collections declare that identifier with `CollectionModelIdentifier`; they do not require a second stored sync key.
+
+`ElectricRow` is the transport representation, `ElectricSchema` is database/transport metadata, and `CollectionRow` is the normalized app-side row. Use `CollectionSchema` when the collection should explicitly parse incoming Electric fields into SwiftData-native values:
+
+```swift
+electricCollectionOptions(
+    identifier: todoIdentifier,
+    shapeURL: shapeURL,
+    table: "todos",
+    collectionSchema: CollectionSchema([
+        "id": .uuid,
+        "projectID": .uuid,
+        "completedAt": .date,
+    ])
+)
+```
+
+When Electric rows are translated into `CollectionRow`, `CollectionSchema` wins first, then Electric/Postgres schema inference is used as a fallback. Postgres `uuid` columns normalize into `.uuid(UUID)` values and temporal columns normalize into `.date(Date)` values.
 
 ## Release Confidence
 

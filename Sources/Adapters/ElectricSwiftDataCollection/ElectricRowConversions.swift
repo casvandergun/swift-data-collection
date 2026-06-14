@@ -3,9 +3,21 @@ import Foundation
 import SwiftDataCollection
 
 extension CollectionValue {
-    init(electricValue: ElectricValue, column: ElectricColumnDefinition? = nil) {
+    init(
+        electricValue: ElectricValue,
+        column: ElectricColumnDefinition? = nil,
+        fieldType: CollectionFieldType? = nil
+    ) {
+        if let fieldType {
+            self = CollectionValue.fieldTypeValue(from: electricValue, fieldType: fieldType)
+            return
+        }
         if let column, column.isCollectionDateColumn {
             self = CollectionValue.dateValue(from: electricValue, column: column)
+            return
+        }
+        if let column, column.isCollectionUUIDColumn {
+            self = CollectionValue.uuidValue(from: electricValue, column: column)
             return
         }
 
@@ -27,12 +39,120 @@ extension CollectionValue {
         }
     }
 
+    private static func fieldTypeValue(from electricValue: ElectricValue, fieldType: CollectionFieldType) -> CollectionValue {
+        switch fieldType {
+        case .string:
+            return matchingStringValue(from: electricValue, fieldType: fieldType)
+        case .integer:
+            return matchingIntegerValue(from: electricValue, fieldType: fieldType)
+        case .double:
+            return matchingDoubleValue(from: electricValue, fieldType: fieldType)
+        case .boolean:
+            return matchingBooleanValue(from: electricValue, fieldType: fieldType)
+        case .date:
+            return dateValue(from: electricValue)
+        case .uuid:
+            return uuidValue(from: electricValue)
+        }
+    }
+
+    private static func matchingStringValue(from electricValue: ElectricValue, fieldType: CollectionFieldType) -> CollectionValue {
+        switch electricValue {
+        case .string(let value):
+            return .string(value)
+        case .array(let values):
+            return .array(values.map { fieldTypeValue(from: $0, fieldType: fieldType) })
+        case .null:
+            return .null
+        case .integer, .double, .boolean, .object:
+            return CollectionValue(electricValue: electricValue)
+        }
+    }
+
+    private static func matchingIntegerValue(from electricValue: ElectricValue, fieldType: CollectionFieldType) -> CollectionValue {
+        switch electricValue {
+        case .integer(let value):
+            return .integer(value)
+        case .array(let values):
+            return .array(values.map { fieldTypeValue(from: $0, fieldType: fieldType) })
+        case .null:
+            return .null
+        case .string, .double, .boolean, .object:
+            return CollectionValue(electricValue: electricValue)
+        }
+    }
+
+    private static func matchingDoubleValue(from electricValue: ElectricValue, fieldType: CollectionFieldType) -> CollectionValue {
+        switch electricValue {
+        case .double(let value):
+            return .double(value)
+        case .array(let values):
+            return .array(values.map { fieldTypeValue(from: $0, fieldType: fieldType) })
+        case .null:
+            return .null
+        case .string, .integer, .boolean, .object:
+            return CollectionValue(electricValue: electricValue)
+        }
+    }
+
+    private static func matchingBooleanValue(from electricValue: ElectricValue, fieldType: CollectionFieldType) -> CollectionValue {
+        switch electricValue {
+        case .boolean(let value):
+            return .boolean(value)
+        case .array(let values):
+            return .array(values.map { fieldTypeValue(from: $0, fieldType: fieldType) })
+        case .null:
+            return .null
+        case .string, .integer, .double, .object:
+            return CollectionValue(electricValue: electricValue)
+        }
+    }
+
     private static func dateValue(from electricValue: ElectricValue, column: ElectricColumnDefinition) -> CollectionValue {
         switch electricValue {
         case .string(let value):
             return ElectricDateParser.parse(value, postgresType: column.type).map(CollectionValue.date) ?? .string(value)
         case .array(let values):
             return .array(values.map { dateValue(from: $0, column: column.scalarColumn) })
+        case .null:
+            return .null
+        case .integer, .double, .boolean, .object:
+            return CollectionValue(electricValue: electricValue)
+        }
+    }
+
+    private static func dateValue(from electricValue: ElectricValue) -> CollectionValue {
+        switch electricValue {
+        case .string(let value):
+            return ElectricDateParser.parseAny(value).map(CollectionValue.date) ?? .string(value)
+        case .array(let values):
+            return .array(values.map { dateValue(from: $0) })
+        case .null:
+            return .null
+        case .integer, .double, .boolean, .object:
+            return CollectionValue(electricValue: electricValue)
+        }
+    }
+
+    private static func uuidValue(from electricValue: ElectricValue, column: ElectricColumnDefinition) -> CollectionValue {
+        switch electricValue {
+        case .string(let value):
+            return UUID(uuidString: value).map(CollectionValue.uuid) ?? .string(value)
+        case .array(let values):
+            return .array(values.map { uuidValue(from: $0, column: column.scalarColumn) })
+        case .null:
+            return .null
+        case .integer, .double, .boolean, .object:
+            return CollectionValue(electricValue: electricValue)
+        }
+    }
+
+    private static func uuidValue(from electricValue: ElectricValue) -> CollectionValue {
+        switch electricValue {
+        case .string(let value):
+            return UUID(uuidString: value).map(CollectionValue.uuid) ?? .string(value)
+        case .array(let values):
+            return .array(values.map { uuidValue(from: $0) })
         case .null:
             return .null
         case .integer, .double, .boolean, .object:
@@ -46,9 +166,20 @@ extension CollectionRow {
         self = electricRow.mapValues { CollectionValue(electricValue: $0) }
     }
 
-    init(electricRow: ElectricRow, schema: ElectricSchema) {
+    init(
+        electricRow: ElectricRow,
+        schema: ElectricSchema,
+        collectionSchema: CollectionSchema = .init()
+    ) {
         self = Dictionary(uniqueKeysWithValues: electricRow.map { key, value in
-            (key, CollectionValue(electricValue: value, column: schema[key]))
+            (
+                key,
+                CollectionValue(
+                    electricValue: value,
+                    column: schema[key],
+                    fieldType: collectionSchema.fields[key]
+                )
+            )
         })
     }
 }
@@ -66,6 +197,8 @@ extension ElectricValue {
             self = .boolean(value)
         case .date(let value):
             self = .string(ElectricDateFormatter.string(from: value))
+        case .uuid(let value):
+            self = .string(value.uuidString)
         case .object(let value):
             self = .object(value.mapValues(ElectricValue.init(collectionValue:)))
         case .array(let value):
@@ -92,6 +225,10 @@ private extension ElectricColumnDefinition {
         }
     }
 
+    var isCollectionUUIDColumn: Bool {
+        type == "uuid"
+    }
+
     var scalarColumn: ElectricColumnDefinition {
         ElectricColumnDefinition(
             type: type,
@@ -107,6 +244,12 @@ private extension ElectricColumnDefinition {
 }
 
 private enum ElectricDateParser {
+    static func parseAny(_ value: String) -> Date? {
+        parse(value, postgresType: "date")
+            ?? parse(value, postgresType: "timestamp")
+            ?? parse(value, postgresType: "timestamptz")
+    }
+
     static func parse(_ value: String, postgresType: String) -> Date? {
         switch postgresType {
         case "date":

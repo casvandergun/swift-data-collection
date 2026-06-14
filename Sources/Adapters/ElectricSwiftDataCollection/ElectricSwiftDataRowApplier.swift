@@ -31,6 +31,7 @@ public typealias ElectricShapeBatchApplyClosure =
 public struct ElectricSwiftDataRowApplier<Model: SwiftDataCollectionModel, ID: Hashable & Sendable> {
     public let rowDecoder: CollectionRowDecoder
     public let identifier: CollectionModelIdentifier<Model, ID>
+    public let collectionSchema: CollectionSchema
     public let debugLogger: ElectricDebugLogger
 
     private enum UpsertOutcome: String {
@@ -42,10 +43,12 @@ public struct ElectricSwiftDataRowApplier<Model: SwiftDataCollectionModel, ID: H
     public init(
         identifier: CollectionModelIdentifier<Model, ID>,
         rowDecoder: CollectionRowDecoder = .init(),
+        collectionSchema: CollectionSchema = .init(),
         debugLogger: ElectricDebugLogger = .disabled
     ) {
         self.identifier = identifier
         self.rowDecoder = rowDecoder
+        self.collectionSchema = collectionSchema
         self.debugLogger = debugLogger
     }
 
@@ -185,7 +188,11 @@ public struct ElectricSwiftDataRowApplier<Model: SwiftDataCollectionModel, ID: H
         schema: ElectricSchema,
         in context: ModelContext
     ) throws -> UpsertOutcome {
-        let collectionRow = CollectionRow(electricRow: row, schema: schema)
+        let collectionRow = CollectionRow(
+            electricRow: row,
+            schema: schema,
+            collectionSchema: collectionSchema
+        )
         if let existing = try fetchModel(key: key, in: context) {
             let appliedRow = if operation == .update {
                 CollectionRowPatcher.applying(patch: collectionRow, to: try existing.collectionRow())

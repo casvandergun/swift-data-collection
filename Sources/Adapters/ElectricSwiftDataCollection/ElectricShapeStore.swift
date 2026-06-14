@@ -93,6 +93,7 @@ public actor ElectricShapeStore {
         table: String,
         shapeID: String? = nil,
         columns: [String] = [],
+        collectionSchema: CollectionSchema = .init(),
         where whereClause: String? = nil,
         replica: ElectricReplica = .default,
         headers: [String: String] = [:],
@@ -116,6 +117,7 @@ public actor ElectricShapeStore {
             try ElectricSwiftDataRowApplier(
                 identifier: identifier,
                 rowDecoder: rowDecoder,
+                collectionSchema: collectionSchema,
                 debugLogger: debugLogger
             )
             .apply(batch, shapeID: shapeID, in: context)

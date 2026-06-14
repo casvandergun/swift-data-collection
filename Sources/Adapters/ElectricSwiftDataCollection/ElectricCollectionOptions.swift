@@ -26,6 +26,7 @@ public struct ElectricCollectionOptions<Model: SwiftDataCollectionModel, ID: Has
     public let table: String
     public let shapeID: String?
     public let columns: [String]
+    public let collectionSchema: CollectionSchema
     public let whereClause: String?
     public let replica: ElectricReplica
     public let headers: [String: String]
@@ -44,6 +45,7 @@ public struct ElectricCollectionOptions<Model: SwiftDataCollectionModel, ID: Has
         table: String,
         shapeID: String? = nil,
         columns: [String] = [],
+        collectionSchema: CollectionSchema = .init(),
         where whereClause: String? = nil,
         replica: ElectricReplica = .default,
         headers: [String: String] = [:],
@@ -66,6 +68,7 @@ public struct ElectricCollectionOptions<Model: SwiftDataCollectionModel, ID: Has
         self.table = table
         self.shapeID = shapeID
         self.columns = columns
+        self.collectionSchema = collectionSchema
         self.whereClause = whereClause
         self.replica = replica
         self.headers = headers
@@ -144,6 +147,7 @@ public func electricCollectionOptions<Model: SwiftDataCollectionModel, ID: Hasha
     table: String,
     shapeID: String? = nil,
     columns: [String] = [],
+    collectionSchema: CollectionSchema = .init(),
     where whereClause: String? = nil,
     replica: ElectricReplica = .default,
     headers: [String: String] = [:],
@@ -161,6 +165,7 @@ public func electricCollectionOptions<Model: SwiftDataCollectionModel, ID: Hasha
         table: table,
         shapeID: shapeID,
         columns: columns,
+        collectionSchema: collectionSchema,
         where: whereClause,
         replica: replica,
         headers: headers,
@@ -212,6 +217,7 @@ actor ElectricCollectionAdapterRuntime<
         let synchronizer = ElectricCollectionSynchronizer<Model, ID>(
             identifier: context.identifier,
             rowDecoder: context.rowDecoder,
+            collectionSchema: configuration.collectionSchema,
             modelName: configuration.modelName,
             collectionID: context.collectionID,
             writeTracer: context.writeTracer,
@@ -228,6 +234,7 @@ actor ElectricCollectionAdapterRuntime<
             table: configuration.table,
             shapeID: resolvedShapeID,
             columns: configuration.columns,
+            collectionSchema: configuration.collectionSchema,
             where: configuration.whereClause,
             replica: configuration.replica,
             headers: configuration.headers,

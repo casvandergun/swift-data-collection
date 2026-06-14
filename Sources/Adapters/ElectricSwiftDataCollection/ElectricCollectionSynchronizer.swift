@@ -6,6 +6,7 @@ import SwiftDataCollection
 struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hashable & Sendable>: Sendable {
     let identifier: CollectionModelIdentifier<Model, ID>
     let rowDecoder: CollectionRowDecoder
+    let collectionSchema: CollectionSchema
     let modelName: String
     let collectionID: String?
     let writeTracer: CollectionWriteTracer
@@ -30,6 +31,7 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
     init(
         identifier: CollectionModelIdentifier<Model, ID>,
         rowDecoder: CollectionRowDecoder = .init(),
+        collectionSchema: CollectionSchema = .init(),
         modelName: String = String(reflecting: Model.self),
         collectionID: String? = nil,
         writeTracer: CollectionWriteTracer = .disabled,
@@ -37,6 +39,7 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
     ) {
         self.identifier = identifier
         self.rowDecoder = rowDecoder
+        self.collectionSchema = collectionSchema
         self.modelName = modelName
         self.collectionID = collectionID
         self.writeTracer = writeTracer
@@ -208,7 +211,11 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
 
         if let existing = try fetchModel(key: key, in: context) {
             let localRow = try existing.collectionRow()
-            let collectionRow = CollectionRow(electricRow: row, schema: batchState.schema)
+            let collectionRow = CollectionRow(
+                electricRow: row,
+                schema: batchState.schema,
+                collectionSchema: collectionSchema
+            )
             if pending.isEmpty {
                 let appliedRow = if operation == .update {
                     CollectionRowPatcher.applying(patch: collectionRow, to: localRow)
@@ -260,7 +267,11 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
             return UpsertOutcome(resolvedTransactionIDs: resolvedTransactionIDs, change: .updated)
         }
 
-        let collectionRow = CollectionRow(electricRow: row, schema: batchState.schema)
+        let collectionRow = CollectionRow(
+            electricRow: row,
+            schema: batchState.schema,
+            collectionSchema: collectionSchema
+        )
         let merged = pending.isEmpty
             ? collectionRow
             : CollectionRowPatcher.applying(

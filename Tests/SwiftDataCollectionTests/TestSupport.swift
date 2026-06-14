@@ -241,7 +241,7 @@ final class TestEvent: SwiftDataCollectionModel {
             "title": .string(title),
             "startTime": .date(startTime),
         ]
-        row["completedAt"] = completedAt.map(CollectionValue.date) ?? .null
+        row["completedAt"] = .date(completedAt)
         return row
     }
 }

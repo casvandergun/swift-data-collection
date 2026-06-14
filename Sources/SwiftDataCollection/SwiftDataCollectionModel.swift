@@ -7,6 +7,7 @@ public enum CollectionValue: Sendable, Hashable, Codable {
     case double(Double)
     case boolean(Bool)
     case date(Date)
+    case uuid(UUID)
     case object([String: CollectionValue])
     case array([CollectionValue])
     case null
@@ -28,7 +29,8 @@ public enum CollectionValue: Sendable, Hashable, Codable {
         } else if let value = try? container.decode(Double.self) {
             self = .double(value)
         } else {
-            self = .string(try container.decode(String.self))
+            let value = try container.decode(String.self)
+            self = UUID(uuidString: value).map(CollectionValue.uuid) ?? .string(value)
         }
     }
 
@@ -45,6 +47,8 @@ public enum CollectionValue: Sendable, Hashable, Codable {
             try container.encode(value)
         case .date(let value):
             try container.encode(CollectionDateValue(date: value))
+        case .uuid(let value):
+            try container.encode(value.uuidString)
         case .object(let value):
             try container.encode(value)
         case .array(let value):
@@ -56,6 +60,23 @@ public enum CollectionValue: Sendable, Hashable, Codable {
 }
 
 public typealias CollectionRow = [String: CollectionValue]
+
+public struct CollectionSchema: Sendable, Hashable, Codable {
+    public var fields: [String: CollectionFieldType]
+
+    public init(_ fields: [String: CollectionFieldType] = [:]) {
+        self.fields = fields
+    }
+}
+
+public enum CollectionFieldType: Sendable, Hashable, Codable {
+    case string
+    case integer
+    case double
+    case boolean
+    case date
+    case uuid
+}
 
 private struct CollectionDateValue: Codable {
     let marker: String
@@ -93,6 +114,46 @@ public enum CollectionRowValueError: Error, Sendable, Hashable {
 }
 
 public extension CollectionValue {
+    static func string(_ value: String?) -> CollectionValue {
+        value.map(CollectionValue.string) ?? .null
+    }
+
+    static func integer(_ value: Int) -> CollectionValue {
+        .integer(Int64(value))
+    }
+
+    static func integer(_ value: Int?) -> CollectionValue {
+        value.map(CollectionValue.integer) ?? .null
+    }
+
+    static func integer(_ value: Int64?) -> CollectionValue {
+        value.map(CollectionValue.integer) ?? .null
+    }
+
+    static func double(_ value: Double?) -> CollectionValue {
+        value.map(CollectionValue.double) ?? .null
+    }
+
+    static func double(_ value: Float) -> CollectionValue {
+        .double(Double(value))
+    }
+
+    static func double(_ value: Float?) -> CollectionValue {
+        value.map(CollectionValue.double) ?? .null
+    }
+
+    static func boolean(_ value: Bool?) -> CollectionValue {
+        value.map(CollectionValue.boolean) ?? .null
+    }
+
+    static func date(_ value: Date?) -> CollectionValue {
+        value.map(CollectionValue.date) ?? .null
+    }
+
+    static func uuid(_ value: UUID?) -> CollectionValue {
+        value.map(CollectionValue.uuid) ?? .null
+    }
+
     var dateValue: Date? {
         guard case .date(let value) = self else { return nil }
         return value
@@ -168,6 +229,8 @@ private struct CollectionValueModelProjection: Encodable {
         case .boolean(let value):
             try container.encode(value)
         case .date(let value):
+            try container.encode(value)
+        case .uuid(let value):
             try container.encode(value)
         case .object(let value):
             try container.encode(CollectionObjectModelProjection(value: value))

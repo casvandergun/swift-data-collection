@@ -109,6 +109,49 @@ struct ElectricSwiftDataBatchApplicationTests {
         #expect(rows.isEmpty)
     }
 
+    @Test("Row applier uses CollectionSchema for inbound normalization")
+    func rowApplierUsesCollectionSchemaForInboundNormalization() throws {
+        let container = try makeTestContainer()
+        let context = ModelContext(container)
+        let synchronizer = ElectricSwiftDataRowApplier(
+            identifier: testEventIdentifier,
+            collectionSchema: CollectionSchema([
+                "startTime": .date,
+            ])
+        )
+        let timestamp = "2026-06-16 00:00:00+00"
+
+        _ = try synchronizer.apply(
+            ShapeBatch(
+                messages: [
+                    ElectricMessage(
+                        key: "\"public\".\"events\"/event-1",
+                        value: [
+                            "id": .string("event-1"),
+                            "title": .string("Launch"),
+                            "startTime": .string(timestamp),
+                        ],
+                        headers: .init(operation: .insert)
+                    ),
+                ],
+                state: testShapeState(offset: "1_0"),
+                schema: [
+                    "startTime": ElectricColumnDefinition(type: "text"),
+                ],
+                reachedUpToDate: false
+            ),
+            shapeID: "events",
+            in: context
+        )
+
+        let inserted = try #require(context.fetch(testEventIdentifier.fetchDescriptor(for: "event-1")).first)
+        let expectedDate = try CollectionRow(
+            electricRow: ["startTime": .string(timestamp)],
+            schema: ["startTime": ElectricColumnDefinition(type: "timestamptz")]
+        ).requiredDate("startTime")
+        #expect(inserted.startTime == expectedDate)
+    }
+
     @Test("Pending local fields are protected during sync")
     func protectsPendingLocalFields() throws {
         let container = try makeTestContainer()
@@ -157,6 +200,49 @@ struct ElectricSwiftDataBatchApplicationTests {
         #expect(updated.title == "Local Title")
         #expect(updated.projectID == "project-b")
         #expect(updated.collectionSyncState == .pendingUpdate)
+    }
+
+    @Test("Collection synchronizer uses CollectionSchema for inbound normalization")
+    func collectionSynchronizerUsesCollectionSchemaForInboundNormalization() throws {
+        let container = try makeTestContainer()
+        let context = ModelContext(container)
+        let synchronizer = ElectricCollectionSynchronizer(
+            identifier: testEventIdentifier,
+            collectionSchema: CollectionSchema([
+                "startTime": .date,
+            ])
+        )
+        let timestamp = "2026-06-16 00:00:00+00"
+
+        _ = try synchronizer.apply(
+            ShapeBatch(
+                messages: [
+                    ElectricMessage(
+                        key: "\"public\".\"events\"/event-1",
+                        value: [
+                            "id": .string("event-1"),
+                            "title": .string("Launch"),
+                            "startTime": .string(timestamp),
+                        ],
+                        headers: .init(operation: .insert)
+                    ),
+                ],
+                state: testShapeState(offset: "1_0"),
+                schema: [
+                    "startTime": ElectricColumnDefinition(type: "text"),
+                ],
+                reachedUpToDate: false
+            ),
+            shapeID: "events",
+            in: context
+        )
+
+        let inserted = try #require(context.fetch(testEventIdentifier.fetchDescriptor(for: "event-1")).first)
+        let expectedDate = try CollectionRow(
+            electricRow: ["startTime": .string(timestamp)],
+            schema: ["startTime": ElectricColumnDefinition(type: "timestamptz")]
+        ).requiredDate("startTime")
+        #expect(inserted.startTime == expectedDate)
     }
 
     @Test("Sparse update preserves required untouched fields in generic SwiftData path")
