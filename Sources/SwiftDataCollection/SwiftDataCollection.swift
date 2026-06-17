@@ -172,7 +172,7 @@ package struct CollectionAdapterContext<
     package let identifier: CollectionModelIdentifier<Model, ID>
     package let rowDecoder: CollectionRowDecoder
     package let debugLogger: CollectionDebugLogger
-    package let writeTracer: CollectionWriteTracer
+    package let tracer: CollectionTracer
     package let onApply: CollectionApplyHandler?
     package let reportApplied: @Sendable (Set<String>, Date?, String?) async -> Void
     package let reportRefreshCompleted: @Sendable (Date?) async -> Void

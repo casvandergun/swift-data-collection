@@ -22,7 +22,7 @@ actor CollectionCoordinator<
     private let modelContainer: ModelContainer
     private let rowDecoder: CollectionRowDecoder
     private let debugLogger: CollectionDebugLogger
-    private let writeTracer: CollectionWriteTracer
+    private let tracer: CollectionTracer
     private let queue: CollectionMutationQueue
     private let reconciler: CollectionMutationReconciler
     private let retryPolicy: any PendingMutationRetryDelaying
@@ -49,7 +49,7 @@ actor CollectionCoordinator<
         modelContainer: ModelContainer,
         rowDecoder: CollectionRowDecoder,
         debugLogger: CollectionDebugLogger,
-        writeTracer: CollectionWriteTracer,
+        tracer: CollectionTracer,
         commitSave: @escaping CollectionCommitSaver = { try $0.save() },
         retryPolicy: any PendingMutationRetryDelaying = CollectionRetryPolicy(),
         retrySleep: @escaping CollectionRetrySleeper = defaultCollectionRetrySleep
@@ -61,7 +61,7 @@ actor CollectionCoordinator<
         self.modelContainer = modelContainer
         self.rowDecoder = rowDecoder
         self.debugLogger = debugLogger
-        self.writeTracer = writeTracer
+        self.tracer = tracer
         self.queue = CollectionMutationQueue(modelContainer: modelContainer)
         self.reconciler = CollectionMutationReconciler(modelContainer: modelContainer)
         self.commitSave = commitSave
@@ -76,14 +76,30 @@ actor CollectionCoordinator<
     func bootstrapIfNeeded() async {
         guard bootstrapCompleted == false else { return }
         bootstrapCompleted = true
-        lifecycleState = .bootstrapping
-        await persistLifecycleState(errorMessage: nil)
+        await transitionLifecycle(to: .bootstrapping, reason: "bootstrap started", errorMessage: nil)
 
         let pendingTransactions = queue.fetchAllPendingTransactions(collectionID: collectionID)
+        trace(
+            .bootstrapStarted,
+            pendingMutationCount: queue.fetchAllPendingMutations(collectionID: collectionID).count,
+            message: "bootstrapping collection with persisted outbox",
+            metadata: [
+                "transactionCount": String(pendingTransactions.count),
+                "transactions": pendingTransactions.map(transactionDebugSummary).joined(separator: " | "),
+            ]
+        )
         debug("bootstrapping collection with \(pendingTransactions.count) persisted transactions")
 
         for transaction in pendingTransactions {
             if transaction.status == .sending {
+                trace(
+                    .replayScheduled,
+                    transactionID: transaction.id,
+                    sequenceNumber: transaction.sequenceNumber,
+                    attemptCount: transaction.attemptCount,
+                    message: "reset persisted sending transaction for replay",
+                    metadata: transactionTraceMetadata(transaction)
+                )
                 transaction.status = .pending
             }
             if transaction.status == .awaitingSync,
@@ -91,8 +107,25 @@ actor CollectionCoordinator<
                 switch completion {
                 case .awaitTokens(let tokens):
                     register(transactionID: transaction.id, awaiting: tokens)
+                    trace(
+                        .awaitedTokensRegistered,
+                        transactionID: transaction.id,
+                        sequenceNumber: transaction.sequenceNumber,
+                        attemptCount: transaction.attemptCount,
+                        awaitedTokens: tokens.map(tokenString).sorted(),
+                        message: "re-registered awaited observation tokens during bootstrap",
+                        metadata: transactionTraceMetadata(transaction)
+                    )
                 case .refresh:
                     awaitingRefreshTransactionIDs.insert(transaction.id)
+                    trace(
+                        .awaitedTokensRegistered,
+                        transactionID: transaction.id,
+                        sequenceNumber: transaction.sequenceNumber,
+                        attemptCount: transaction.attemptCount,
+                        message: "re-registered refresh completion during bootstrap",
+                        metadata: transactionTraceMetadata(transaction)
+                    )
                 case .immediate:
                     reconciler.resolveTransaction(id: transaction.id, collectionID: collectionID)
                 }
@@ -102,14 +135,17 @@ actor CollectionCoordinator<
         try? queue.saveContext()
         refreshPendingModelStates()
         await drainDispatchIfNeeded()
-        lifecycleState = .idle
-        await persistLifecycleState(errorMessage: nil)
+        trace(
+            .bootstrapCompleted,
+            pendingMutationCount: queue.fetchAllPendingMutations(collectionID: collectionID).count,
+            message: "completed collection bootstrap"
+        )
+        await transitionLifecycle(to: .idle, reason: "bootstrap completed", errorMessage: nil)
     }
 
     func start() async {
         await bootstrapIfNeeded()
-        lifecycleState = .syncing
-        await persistLifecycleState(errorMessage: nil)
+        await transitionLifecycle(to: .syncing, reason: "collection start requested", errorMessage: nil)
         await adapterRuntime.start()
         await drainDispatchIfNeeded()
     }
@@ -117,14 +153,12 @@ actor CollectionCoordinator<
     func stop() async {
         cancelScheduledRetry()
         await adapterRuntime.stop()
-        lifecycleState = .idle
-        await persistLifecycleState(errorMessage: nil)
+        await transitionLifecycle(to: .idle, reason: "collection stop requested", errorMessage: nil)
     }
 
     func refresh() async {
         await bootstrapIfNeeded()
-        lifecycleState = .syncing
-        await persistLifecycleState(errorMessage: nil)
+        await transitionLifecycle(to: .syncing, reason: "collection refresh requested", errorMessage: nil)
         await adapterRuntime.refresh()
         await drainDispatchIfNeeded()
     }
@@ -201,7 +235,7 @@ actor CollectionCoordinator<
             modelName: configuration.modelName,
             identifier: configuration.identifier,
             rowDecoder: rowDecoder,
-            writeTracer: writeTracer
+            tracer: tracer
         )
 
         do {
@@ -270,6 +304,16 @@ actor CollectionCoordinator<
         offset: String?
     ) async {
         trace(
+            .adapterBatchObserved,
+            observedTokens: observedTokens.map(tokenString).sorted(),
+            offset: offset,
+            message: "coordinator observed applied adapter batch",
+            metadata: [
+                "observedTXIDs": observedTokens.map(tokenString).sorted().joined(separator: ","),
+                "awaitingTransactions": String(remainingTokensByTransactionID.count),
+            ]
+        )
+        trace(
             .shapeBatchApplied,
             observedTokens: observedTokens.map(tokenString).sorted(),
             offset: offset,
@@ -293,12 +337,12 @@ actor CollectionCoordinator<
                 .transactionCompleted,
                 transactionID: transactionID,
                 observedTokens: observedTokens.map(tokenString).sorted(),
-                message: "completed transaction after reconciliation"
+                message: "completed transaction after reconciliation",
+                metadata: ["observedTXIDs": observedTokens.map(tokenString).sorted().joined(separator: ",")]
             )
         }
 
-        lifecycleState = .ready
-        await persistLifecycleState(errorMessage: nil, lastSyncedAt: lastSyncedAt)
+        await transitionLifecycle(to: .ready, reason: "adapter batch applied", errorMessage: nil, lastSyncedAt: lastSyncedAt)
         await drainDispatchIfNeeded()
     }
 
@@ -319,13 +363,15 @@ actor CollectionCoordinator<
         }
 
         refreshPendingModelStates()
-        lifecycleState = .ready
-        await persistLifecycleState(errorMessage: nil, lastSyncedAt: lastSyncedAt)
+        await transitionLifecycle(to: .ready, reason: "adapter refresh completed", errorMessage: nil, lastSyncedAt: lastSyncedAt)
     }
 
     func didEncounterAdapterError(_ error: Error) async {
-        lifecycleState = .error(String(describing: error))
-        await persistLifecycleState(errorMessage: String(describing: error))
+        await transitionLifecycle(
+            to: .error(String(describing: error)),
+            reason: "adapter error",
+            errorMessage: String(describing: error)
+        )
         debug("adapter error for \(configuration.debugName): \(error)")
     }
 
@@ -366,8 +412,12 @@ actor CollectionCoordinator<
             }
 
             cancelScheduledRetry()
-            lifecycleState = .replaying
-            await persistLifecycleState(errorMessage: nil)
+            await transitionLifecycle(to: .replaying, reason: "eligible transactions scheduled for replay", errorMessage: nil)
+            trace(
+                .replayStarted,
+                message: "starting replay drain for eligible transactions",
+                metadata: ["transactionIDs": eligibleIDs.map(\.uuidString).joined(separator: ",")]
+            )
             pendingDispatchIDs.append(contentsOf: eligibleIDs)
         }
     }
@@ -493,8 +543,11 @@ actor CollectionCoordinator<
                 await liveTransaction.fail(error)
             }
 
-            lifecycleState = .error(String(describing: error))
-            await persistLifecycleState(errorMessage: String(describing: error))
+            await transitionLifecycle(
+                to: .error(String(describing: error)),
+                reason: "dispatch failed",
+                errorMessage: String(describing: error)
+            )
             trace(
                 .transactionFailed,
                 transactionID: id,
@@ -519,6 +572,14 @@ actor CollectionCoordinator<
         cancelScheduledRetry()
         scheduledRetryAt = nextRetryAt
         let delay = max(0, nextRetryAt.timeIntervalSince(now))
+        trace(
+            .retryScheduled,
+            message: "scheduled next failed transaction retry",
+            metadata: [
+                "nextRetryAt": isoString(nextRetryAt),
+                "delay": String(delay),
+            ]
+        )
         let retrySleep = self.retrySleep
         scheduledRetryTask = Task {
             await retrySleep(delay)
@@ -531,6 +592,11 @@ actor CollectionCoordinator<
         guard scheduledRetryAt == expectedRetryAt else { return }
         scheduledRetryAt = nil
         scheduledRetryTask = nil
+        trace(
+            .retryFired,
+            message: "scheduled retry fired",
+            metadata: ["expectedRetryAt": isoString(expectedRetryAt)]
+        )
         await drainDispatchIfNeeded()
     }
 
@@ -591,7 +657,11 @@ actor CollectionCoordinator<
                 key: group.first?.targetKey,
                 operation: group.first?.operation,
                 pendingMutationCount: group.count,
-                message: "invoking outbound mutation handler"
+                message: "invoking outbound mutation handler",
+                metadata: [
+                    "keys": group.map(\.targetKey).joined(separator: ","),
+                    "mutations": debugString(mutations.map(mutationDebugPayload)),
+                ]
             )
 
             let completion: CollectionMutationCompletion
@@ -621,7 +691,8 @@ actor CollectionCoordinator<
                     key: group.first?.targetKey,
                     operation: group.first?.operation,
                     pendingMutationCount: group.count,
-                    message: "outbound handler completed immediately"
+                    message: "outbound handler completed immediately",
+                    metadata: ["completion": "immediate"]
                 )
             case .refresh:
                 requiresRefresh = true
@@ -631,7 +702,8 @@ actor CollectionCoordinator<
                     key: group.first?.targetKey,
                     operation: group.first?.operation,
                     pendingMutationCount: group.count,
-                    message: "outbound handler requested refresh completion"
+                    message: "outbound handler requested refresh completion",
+                    metadata: ["completion": "refresh"]
                 )
             case .awaitTokens(let tokens):
                 guard tokens.isEmpty == false else {
@@ -645,7 +717,11 @@ actor CollectionCoordinator<
                     operation: group.first?.operation,
                     awaitedTokens: tokens.map(tokenString).sorted(),
                     pendingMutationCount: group.count,
-                    message: "outbound handler returned awaited observation tokens"
+                    message: "outbound handler returned awaited observation tokens",
+                    metadata: [
+                        "completion": "awaitTokens",
+                        "awaitedTXIDs": tokens.map(tokenString).sorted().joined(separator: ","),
+                    ]
                 )
             }
         }
@@ -703,7 +779,8 @@ actor CollectionCoordinator<
                 key: mutation.key,
                 operation: mutation.operation,
                 pendingMutationCount: pendingMutationCount,
-                message: message
+                message: message,
+                metadata: mutationTraceMetadata(mutation)
             )
         }
     }
@@ -718,6 +795,13 @@ actor CollectionCoordinator<
         for token in tokens {
             awaitedTransactionIDsByToken[token, default: []].insert(transactionID)
         }
+        trace(
+            .awaitedTokensRegistered,
+            transactionID: transactionID,
+            awaitedTokens: tokens.map(tokenString).sorted(),
+            message: "registered awaited observation tokens",
+            metadata: ["awaitedTXIDs": tokens.map(tokenString).sorted().joined(separator: ",")]
+        )
     }
 
     private func refreshPendingModelStates(keys: Set<String>? = nil) {
@@ -741,6 +825,31 @@ actor CollectionCoordinator<
             )
         }
         try? queue.saveContext()
+        trace(
+            .pendingStateRefreshed,
+            pendingMutationCount: queue.fetchAllPendingMutations(collectionID: collectionID).count,
+            message: "refreshed pending row sync state",
+            metadata: ["keys": keysToRefresh.sorted().joined(separator: ",")]
+        )
+    }
+
+    private func transitionLifecycle(
+        to newState: CollectionLifecycleState,
+        reason: String,
+        errorMessage: String?,
+        lastSyncedAt: Date? = nil
+    ) async {
+        let oldState = lifecycleState
+        lifecycleState = newState
+        trace(
+            .lifecycleChanged,
+            message: reason,
+            metadata: [
+                "from": lifecycleDebugString(oldState),
+                "to": lifecycleDebugString(newState),
+            ]
+        )
+        await persistLifecycleState(errorMessage: errorMessage, lastSyncedAt: lastSyncedAt)
     }
 
     private func persistLifecycleState(
@@ -773,8 +882,88 @@ actor CollectionCoordinator<
         String(describing: token)
     }
 
+    private func transactionTraceMetadata(_ transaction: PendingCollectionTransaction) -> [String: String] {
+        [
+            "status": transaction.status.rawValue,
+            "completion": transaction.completion().map(String.init(describing:)) ?? "",
+            "awaitedTokens": transaction.awaitedObservationTokens.joined(separator: ","),
+            "awaitedTXIDs": transaction.awaitedObservationTokens.joined(separator: ","),
+            "nextRetryAt": transaction.nextRetryAt.map(isoString) ?? "",
+            "mutationCount": String(queue.fetchPendingMutations(transactionID: transaction.id).count),
+        ]
+    }
+
+    private func transactionDebugSummary(_ transaction: PendingCollectionTransaction) -> String {
+        [
+            "id=\(transaction.id.uuidString)",
+            "seq=\(transaction.sequenceNumber)",
+            "status=\(transaction.status.rawValue)",
+            "attempt=\(transaction.attemptCount)",
+            "awaited=\(transaction.awaitedObservationTokens.joined(separator: ","))",
+        ].joined(separator: " ")
+    }
+
+    private func mutationTraceMetadata(_ mutation: CollectionMutation) -> [String: String] {
+        var metadata: [String: String] = [
+            "changes": debugString(mutation.changes),
+            "changedFields": mutation.changes.keys.sorted().joined(separator: ","),
+            "metadata": debugString(mutation.metadata),
+        ]
+        if let original = mutation.original {
+            metadata["original"] = debugString(original)
+        }
+        if let modified = mutation.modified {
+            metadata["modified"] = debugString(modified)
+        }
+        return metadata
+    }
+
+    private func mutationDebugPayload(_ mutation: CollectionMutation) -> MutationDebugPayload {
+        MutationDebugPayload(
+            operation: mutation.operation.rawValue,
+            key: mutation.key,
+            original: mutation.original,
+            modified: mutation.modified,
+            changes: mutation.changes,
+            metadata: mutation.metadata.mapValues(String.init(describing:))
+        )
+    }
+
+    private struct MutationDebugPayload: Encodable {
+        let operation: String
+        let key: String
+        let original: CollectionRow?
+        let modified: CollectionRow?
+        let changes: CollectionRow
+        let metadata: [String: String]
+    }
+
+    private func debugString<T: Encodable>(_ value: T) -> String {
+        guard let data = try? JSONEncoder().encode(value),
+              let string = String(data: data, encoding: .utf8) else {
+            return String(describing: value)
+        }
+        return string
+    }
+
+    private func lifecycleDebugString(_ state: CollectionLifecycleState) -> String {
+        switch state {
+        case .idle: "idle"
+        case .bootstrapping: "bootstrapping"
+        case .syncing: "syncing"
+        case .replaying: "replaying"
+        case .ready: "ready"
+        case .offline: "offline"
+        case .error(let message): "error(\(message))"
+        }
+    }
+
+    private func isoString(_ date: Date) -> String {
+        ISO8601DateFormatter().string(from: date)
+    }
+
     private func trace(
-        _ kind: CollectionWriteDebugEventKind,
+        _ kind: CollectionTraceEventKind,
         transactionID: UUID? = nil,
         key: String? = nil,
         operation: CollectionMutationOperation? = nil,
@@ -789,8 +978,8 @@ actor CollectionCoordinator<
         error: Error? = nil,
         metadata: [String: String] = [:]
     ) {
-        writeTracer.record(
-            CollectionWriteDebugEvent(
+        tracer.record(
+            CollectionTraceEvent(
                 kind: kind,
                 collectionID: collectionID,
                 shapeID: sourceID,

@@ -567,14 +567,14 @@ struct ElectricDatabaseReconciliationTests {
         #expect(try context.fetch(FetchDescriptor<ElectricPendingMutation>()).isEmpty)
     }
 
-    @Test("Write tracer records transaction lifecycle")
-    func writeTracerRecordsTransactionLifecycle() async throws {
-        let recorder = TestWriteTraceRecorder()
+    @Test("Tracer records transaction lifecycle")
+    func tracerRecordsTransactionLifecycle() async throws {
+        let recorder = TestTraceRecorder()
         let container = try makeTestContainer()
         let database = ElectricCollectionStore(
             shapeURL: URL(string: "http://localhost:3000/v1/shape")!,
             modelContainer: container,
-            writeTracer: recorder.tracer()
+            diagnostics: recorder.diagnostics()
         )
 
         let collection = try await database.collection(
@@ -626,6 +626,7 @@ struct ElectricDatabaseReconciliationTests {
             .dispatchStarted,
             .handlerInvoked,
             .handlerReturned,
+            .awaitedTokensRegistered,
             .awaitingSync,
             .transactionCompleted,
         ])
@@ -637,19 +638,131 @@ struct ElectricDatabaseReconciliationTests {
         let awaited = try #require(events.first(where: { $0.kind == .awaitingSync }))
         #expect(awaited.awaitedTXIDs == [101])
 
+        let registered = try #require(events.first(where: { $0.kind == .awaitedTokensRegistered }))
+        #expect(registered.metadata["awaitedTXIDs"] == "101")
+
+        let optimistic = try #require(events.first(where: { $0.kind == .optimisticMutationRecorded }))
+        #expect(optimistic.metadata["modified"]?.contains("\"title\":\"Inserted\"") == true)
+        #expect(optimistic.metadata["changes"]?.contains("\"title\":\"Inserted\"") == true)
+
+        let handlerInvoked = try #require(events.first(where: { $0.kind == .handlerInvoked }))
+        #expect(handlerInvoked.metadata["mutations"]?.contains("\"key\":\"todo-1\"") == true)
+        #expect(handlerInvoked.metadata["mutations"]?.contains("\"title\":\"Inserted\"") == true)
+
         let completed = try #require(events.last)
         #expect(completed.kind == .transactionCompleted)
         #expect(completed.observedTXIDs == [101])
     }
 
-    @Test("Write tracer records merged same-key mutations")
-    func writeTracerRecordsMergedMutations() async throws {
-        let recorder = TestWriteTraceRecorder()
+    @Test("Basic diagnostics omit row payload values but keep txids and ordering metadata")
+    func basicDiagnosticsOmitRowPayloadValues() async throws {
+        let recorder = TestTraceRecorder()
         let container = try makeTestContainer()
         let database = ElectricCollectionStore(
             shapeURL: URL(string: "http://localhost:3000/v1/shape")!,
             modelContainer: container,
-            writeTracer: recorder.tracer()
+            diagnostics: recorder.diagnostics(level: .basic)
+        )
+
+        let collection = try await database.collection(
+            TestTodo.self,
+            identifier: testTodoIdentifier,
+            table: "todos",
+            onInsert: { _ in ElectricMutationSubmission(awaitedTXIDs: [101]) }
+        )
+
+        let transaction = try await collection.insert {
+            TestTodo(id: "todo-1", projectID: "project-a", title: "Inserted")
+        }
+        let transactionID = await transaction.id
+
+        let events = recorder.events.filter { $0.transactionID == transactionID }
+        let optimistic = try #require(events.first(where: { $0.kind == .optimisticMutationRecorded }))
+        #expect(optimistic.metadata["modified"] == nil)
+        #expect(optimistic.metadata["changes"] == nil)
+        #expect(optimistic.metadata["metadata"] == nil)
+        #expect(optimistic.key == "todo-1")
+
+        let handlerInvoked = try #require(events.first(where: { $0.kind == .handlerInvoked }))
+        #expect(handlerInvoked.metadata["mutations"] == nil)
+        #expect(handlerInvoked.metadata["keys"] == "todo-1")
+
+        let handlerReturned = try #require(events.first(where: { $0.kind == .handlerReturned }))
+        #expect(handlerReturned.metadata["awaitedTXIDs"] == "101")
+        #expect(handlerReturned.awaitedTXIDs == [101])
+    }
+
+    @Test("Logger diagnostics emit basic metadata")
+    func loggerDiagnosticsEmitBasicMetadata() async throws {
+        let recorder = TestCollectionDebugRecorder()
+        let container = try makeTestContainer()
+        let database = ElectricCollectionStore(
+            shapeURL: URL(string: "http://localhost:3000/v1/shape")!,
+            modelContainer: container,
+            diagnostics: .logger(recorder.logger(), level: .basic)
+        )
+
+        let collection = try await database.collection(
+            TestTodo.self,
+            identifier: testTodoIdentifier,
+            table: "todos",
+            onInsert: { _ in ElectricMutationSubmission(awaitedTXIDs: [101]) }
+        )
+
+        _ = try await collection.insert {
+            TestTodo(id: "todo-1", projectID: "project-a", title: "Inserted")
+        }
+
+        let optimisticEvents = recorder.events.filter {
+            $0.category == "CollectionTrace"
+                && $0.message.contains("optimisticMutationRecorded")
+        }
+        let optimistic = try #require(optimisticEvents.first)
+        #expect(optimistic.metadata["key"] == "todo-1")
+        #expect(optimistic.metadata["modified"] == nil)
+        #expect(optimistic.metadata["changes"] == nil)
+
+        let returnedEvents = recorder.events.filter {
+            $0.category == "CollectionTrace"
+                && $0.message.contains("handlerReturned")
+        }
+        let returned = try #require(returnedEvents.first)
+        #expect(returned.metadata["awaitedTXIDs"] == "101")
+        #expect(returned.metadata["awaitedTokens"] == "101")
+    }
+
+    @Test("Off diagnostics suppress trace events")
+    func offDiagnosticsSuppressTraceEvents() async throws {
+        let recorder = TestTraceRecorder()
+        let container = try makeTestContainer()
+        let database = ElectricCollectionStore(
+            shapeURL: URL(string: "http://localhost:3000/v1/shape")!,
+            modelContainer: container,
+            diagnostics: recorder.diagnostics(level: .off)
+        )
+
+        let collection = try await database.collection(
+            TestTodo.self,
+            identifier: testTodoIdentifier,
+            table: "todos",
+            onInsert: { _ in ElectricMutationSubmission(awaitedTXIDs: [101]) }
+        )
+
+        _ = try await collection.insert {
+            TestTodo(id: "todo-1", projectID: "project-a", title: "Inserted")
+        }
+
+        #expect(recorder.events.isEmpty)
+    }
+
+    @Test("Tracer records merged same-key mutations")
+    func tracerRecordsMergedMutations() async throws {
+        let recorder = TestTraceRecorder()
+        let container = try makeTestContainer()
+        let database = ElectricCollectionStore(
+            shapeURL: URL(string: "http://localhost:3000/v1/shape")!,
+            modelContainer: container,
+            diagnostics: recorder.diagnostics()
         )
 
         let collection = try await database.collection(
@@ -675,5 +788,7 @@ struct ElectricDatabaseReconciliationTests {
             })
         )
         #expect(mergeEvent.message == "coalesced create+update -> create")
+        #expect(mergeEvent.metadata["modified"]?.contains("\"title\":\"Published\"") == true)
+        #expect(mergeEvent.metadata["changes"]?.contains("\"title\":\"Published\"") == true)
     }
 }

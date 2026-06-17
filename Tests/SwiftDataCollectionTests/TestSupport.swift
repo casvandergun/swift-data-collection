@@ -18,8 +18,8 @@ typealias ElectricCollectionMetadata = CollectionMetadata
 typealias ElectricMutationOperation = CollectionMutationOperation
 typealias ElectricMutationStatus = PendingMutationStatus
 typealias ElectricSyncState = CollectionSyncState
-typealias ElectricWriteDebugEvent = CollectionWriteDebugEvent
-typealias ElectricWriteTracer = CollectionWriteTracer
+typealias ElectricTraceEvent = CollectionTraceEvent
+typealias ElectricTracer = CollectionTracer
 typealias ElectricPendingMutationRetryDelaying = PendingMutationRetryDelaying
 typealias ElectricForegroundObserverRegistrar = CollectionForegroundObserverRegistrar
 typealias ElectricForegroundObserverToken = CollectionForegroundObserverToken
@@ -40,7 +40,7 @@ extension PendingCollectionMutation {
     }
 }
 
-extension CollectionWriteDebugEvent {
+extension CollectionTraceEvent {
     var awaitedTXIDs: [Int64] {
         awaitedTokens.compactMap(Int64.init)
     }
@@ -678,23 +678,29 @@ let testTodoIdentifier = ElectricModelIdentifier<TestTodo, String>.string(
     }
 )
 
-final class TestWriteTraceRecorder: @unchecked Sendable {
+final class TestTraceRecorder: @unchecked Sendable {
     private let lock = NSLock()
-    private var storage: [ElectricWriteDebugEvent] = []
+    private var storage: [ElectricTraceEvent] = []
 
-    func tracer() -> ElectricWriteTracer {
-        ElectricWriteTracer { [weak self] event in
+    func tracer() -> ElectricTracer {
+        ElectricTracer { [weak self] event in
             self?.record(event)
         }
     }
 
-    var events: [ElectricWriteDebugEvent] {
+    func diagnostics(level: CollectionDiagnosticsLevel = .detailed) -> CollectionDiagnostics {
+        CollectionDiagnostics.handler(level: level) { [weak self] event in
+            self?.record(event)
+        }
+    }
+
+    var events: [ElectricTraceEvent] {
         lock.lock()
         defer { lock.unlock() }
         return storage
     }
 
-    private func record(_ event: ElectricWriteDebugEvent) {
+    private func record(_ event: ElectricTraceEvent) {
         lock.lock()
         storage.append(event)
         lock.unlock()
@@ -718,6 +724,29 @@ final class TestDebugRecorder: @unchecked Sendable {
     }
 
     private func record(_ event: ElectricDebugEvent) {
+        lock.lock()
+        storage.append(event)
+        lock.unlock()
+    }
+}
+
+final class TestCollectionDebugRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [CollectionDebugEvent] = []
+
+    func logger() -> CollectionDebugLogger {
+        CollectionDebugLogger { [weak self] event in
+            self?.record(event)
+        }
+    }
+
+    var events: [CollectionDebugEvent] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    private func record(_ event: CollectionDebugEvent) {
         lock.lock()
         storage.append(event)
         lock.unlock()

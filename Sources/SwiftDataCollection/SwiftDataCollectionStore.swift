@@ -52,7 +52,7 @@ public actor SwiftDataCollectionStore {
     private let modelContainer: ModelContainer
     private let rowDecoder: CollectionRowDecoder
     private let debugLogger: CollectionDebugLogger
-    private let writeTracer: CollectionWriteTracer
+    private let tracer: CollectionTracer
     private let commitSave: CollectionCommitSaver
     private let retryPolicy: any PendingMutationRetryDelaying
     private let retrySleep: CollectionRetrySleeper
@@ -67,14 +67,12 @@ public actor SwiftDataCollectionStore {
     public init(
         modelContainer: ModelContainer,
         rowDecoder: CollectionRowDecoder = .init(),
-        debugLogger: CollectionDebugLogger = .disabled,
-        writeTracer: CollectionWriteTracer = .disabled
+        diagnostics: CollectionDiagnostics = .disabled
     ) {
         self.init(
             modelContainer: modelContainer,
             rowDecoder: rowDecoder,
-            debugLogger: debugLogger,
-            writeTracer: writeTracer,
+            diagnostics: diagnostics,
             commitSave: { try $0.save() },
             retryPolicy: CollectionRetryPolicy(),
             retrySleep: defaultCollectionRetrySleep,
@@ -85,8 +83,7 @@ public actor SwiftDataCollectionStore {
     package init(
         modelContainer: ModelContainer,
         rowDecoder: CollectionRowDecoder = .init(),
-        debugLogger: CollectionDebugLogger = .disabled,
-        writeTracer: CollectionWriteTracer = .disabled,
+        diagnostics: CollectionDiagnostics = .disabled,
         commitSave: @escaping CollectionCommitSaver = { try $0.save() },
         retryPolicy: any PendingMutationRetryDelaying = CollectionRetryPolicy(),
         retrySleep: @escaping CollectionRetrySleeper = defaultCollectionRetrySleep,
@@ -94,8 +91,8 @@ public actor SwiftDataCollectionStore {
     ) {
         self.modelContainer = modelContainer
         self.rowDecoder = rowDecoder
-        self.debugLogger = debugLogger
-        self.writeTracer = writeTracer
+        self.debugLogger = diagnostics.logger
+        self.tracer = diagnostics.tracer
         self.commitSave = commitSave
         self.retryPolicy = retryPolicy
         self.retrySleep = retrySleep
@@ -237,7 +234,7 @@ public actor SwiftDataCollectionStore {
             identifier: options.identifier,
             rowDecoder: rowDecoder,
             debugLogger: debugLogger,
-            writeTracer: writeTracer,
+            tracer: tracer,
             onApply: options.onApply,
             reportApplied: { observedTokens, lastSyncedAt, offset in
                 await relay.reportApplied(
@@ -263,7 +260,7 @@ public actor SwiftDataCollectionStore {
             modelContainer: modelContainer,
             rowDecoder: rowDecoder,
             debugLogger: debugLogger,
-            writeTracer: writeTracer,
+            tracer: tracer,
             commitSave: commitSave,
             retryPolicy: retryPolicy,
             retrySleep: retrySleep
@@ -318,7 +315,7 @@ extension SwiftDataCollectionStore {
     package var storeModelContainer: ModelContainer { modelContainer }
     package var storeRowDecoder: CollectionRowDecoder { rowDecoder }
     package var storeDebugLogger: CollectionDebugLogger { debugLogger }
-    package var storeWriteTracer: CollectionWriteTracer { writeTracer }
+    package var storeTracer: CollectionTracer { tracer }
 
     package func existingRegistration(modelName: String) -> CollectionManagedModelRegistration? {
         registrationsByModelName[modelName]

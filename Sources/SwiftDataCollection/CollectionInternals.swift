@@ -504,7 +504,7 @@ public final class CollectionTransactionBuilder<Model: SwiftDataCollectionModel,
     private let modelName: String
     private let identifier: CollectionModelIdentifier<Model, ID>
     private let rowDecoder: CollectionRowDecoder
-    private let writeTracer: CollectionWriteTracer
+    private let tracer: CollectionTracer
     private var mutationsByKey: [String: CollectionMutation] = [:]
     private var mutationOrder: [String] = []
 
@@ -516,7 +516,7 @@ public final class CollectionTransactionBuilder<Model: SwiftDataCollectionModel,
         modelName: String,
         identifier: CollectionModelIdentifier<Model, ID>,
         rowDecoder: CollectionRowDecoder,
-        writeTracer: CollectionWriteTracer
+        tracer: CollectionTracer
     ) {
         self.context = ModelContext(modelContainer)
         self.transactionID = transactionID
@@ -525,7 +525,7 @@ public final class CollectionTransactionBuilder<Model: SwiftDataCollectionModel,
         self.modelName = modelName
         self.identifier = identifier
         self.rowDecoder = rowDecoder
-        self.writeTracer = writeTracer
+        self.tracer = tracer
     }
 
     public func insert(
@@ -655,7 +655,8 @@ public final class CollectionTransactionBuilder<Model: SwiftDataCollectionModel,
                 .mutationMerged,
                 key: mutation.key,
                 operation: merged?.operation,
-                message: "coalesced \(existing.operation.rawValue)+\(mutation.operation.rawValue) -> \(result)"
+                message: "coalesced \(existing.operation.rawValue)+\(mutation.operation.rawValue) -> \(result)",
+                metadata: mutationTraceMetadata(mutation)
             )
             if let merged {
                 mutationsByKey[mutation.key] = merged
@@ -693,14 +694,15 @@ public final class CollectionTransactionBuilder<Model: SwiftDataCollectionModel,
     }
 
     private func trace(
-        _ kind: CollectionWriteDebugEventKind,
+        _ kind: CollectionTraceEventKind,
         key: String? = nil,
         operation: CollectionMutationOperation? = nil,
         pendingMutationCount: Int? = nil,
-        message: String? = nil
+        message: String? = nil,
+        metadata: [String: String] = [:]
     ) {
-        writeTracer.record(
-            CollectionWriteDebugEvent(
+        tracer.record(
+            CollectionTraceEvent(
                 kind: kind,
                 collectionID: collectionID,
                 shapeID: shapeID,
@@ -709,9 +711,33 @@ public final class CollectionTransactionBuilder<Model: SwiftDataCollectionModel,
                 key: key,
                 operation: operation,
                 pendingMutationCount: pendingMutationCount,
-                message: message
+                message: message,
+                metadata: metadata
             )
         )
+    }
+
+    private func mutationTraceMetadata(_ mutation: CollectionMutation) -> [String: String] {
+        var metadata: [String: String] = [
+            "changes": debugString(mutation.changes),
+            "changedFields": mutation.changes.keys.sorted().joined(separator: ","),
+            "metadata": debugString(mutation.metadata),
+        ]
+        if let original = mutation.original {
+            metadata["original"] = debugString(original)
+        }
+        if let modified = mutation.modified {
+            metadata["modified"] = debugString(modified)
+        }
+        return metadata
+    }
+
+    private func debugString<T: Encodable>(_ value: T) -> String {
+        guard let data = try? JSONEncoder().encode(value),
+              let string = String(data: data, encoding: .utf8) else {
+            return String(describing: value)
+        }
+        return string
     }
 }
 

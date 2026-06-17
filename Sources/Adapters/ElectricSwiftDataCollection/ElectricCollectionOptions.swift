@@ -220,7 +220,7 @@ actor ElectricCollectionAdapterRuntime<
             collectionSchema: configuration.collectionSchema,
             modelName: configuration.modelName,
             collectionID: context.collectionID,
-            writeTracer: context.writeTracer,
+            tracer: context.tracer,
             debugLogger: context.debugLogger.electricDebugLogger
         )
         let resolvedShapeID = ElectricCollectionOptions<Model, ID>.resolvedShapeID(
@@ -301,16 +301,14 @@ public extension SwiftDataCollectionStore {
         shapeURL _: URL,
         modelContainer: ModelContainer,
         rowDecoder: CollectionRowDecoder = .init(),
-        debugLogger: CollectionDebugLogger = .disabled,
-        writeTracer: CollectionWriteTracer = .disabled,
+        diagnostics: CollectionDiagnostics = .disabled,
         commitSave: @escaping @Sendable (ModelContext) throws -> Void = { try $0.save() },
         retryPolicy: any PendingMutationRetryDelaying = CollectionRetryPolicy()
     ) {
         self.init(
             modelContainer: modelContainer,
             rowDecoder: rowDecoder,
-            debugLogger: debugLogger,
-            writeTracer: writeTracer,
+            diagnostics: diagnostics,
             commitSave: commitSave,
             retryPolicy: retryPolicy
         )

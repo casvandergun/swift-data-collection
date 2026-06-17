@@ -148,6 +148,83 @@ struct ElectricCollectionRestartTests {
         #expect(replayed.status == .awaitingSync)
     }
 
+    @Test("Replay tracing records reset dispatch and awaited txids after restart")
+    func replayTracingRecordsResetDispatchAndAwaitedTXIDsAfterRestart() async throws {
+        let storeLocation = TestStoreLocation()
+        defer { storeLocation.cleanup() }
+
+        let container = try storeLocation.makeContainer()
+        let database = ElectricCollectionStore(
+            shapeURL: URL(string: "http://localhost:3000/v1/shape")!,
+            modelContainer: container
+        )
+        let collection = try await database.collection(
+            TestTodo.self,
+            identifier: testTodoIdentifier,
+            table: "todos",
+            onInsert: { _ in ElectricMutationSubmission(awaitedTXIDs: [111]) }
+        )
+
+        _ = try await collection.insert {
+            TestTodo(id: "todo-1", projectID: "project-a", title: "Inserted")
+        }
+
+        let sendingContext = ModelContext(container)
+        let transaction = try #require(sendingContext.fetch(FetchDescriptor<ElectricPendingTransaction>()).first)
+        let transactionID = transaction.id
+        transaction.status = .sending
+        transaction.awaitedTXIDs = []
+        transaction.nextRetryAt = nil
+
+        let mutation = try #require(sendingContext.fetch(FetchDescriptor<ElectricPendingMutation>()).first)
+        mutation.status = .sending
+        mutation.awaitedTXIDs = []
+        mutation.nextRetryAt = nil
+        try sendingContext.save()
+
+        let recorder = TestTraceRecorder()
+        let counter = CallCounter()
+        let reopenedContainer = try storeLocation.makeContainer()
+        let reopenedDatabase = ElectricCollectionStore(
+            shapeURL: URL(string: "http://localhost:3000/v1/shape")!,
+            modelContainer: reopenedContainer,
+            diagnostics: recorder.diagnostics()
+        )
+        _ = try await reopenedDatabase.collection(
+            TestTodo.self,
+            identifier: testTodoIdentifier,
+            table: "todos",
+            onInsert: { context in
+                _ = await counter.record(key: context.mutations[0].key)
+                return ElectricMutationSubmission(awaitedTXIDs: [111])
+            }
+        )
+
+        try await waitUntil {
+            await counter.value() == 1
+        }
+
+        let events = recorder.events
+        let reset = try #require(
+            events.first(where: { $0.kind == .replayScheduled && $0.transactionID == transactionID })
+        )
+        #expect(reset.metadata["status"] == "sending")
+
+        let replayStarted = try #require(events.first(where: { $0.kind == .replayStarted }))
+        #expect(replayStarted.metadata["transactionIDs"]?.contains(transactionID.uuidString) == true)
+
+        let handlerReturned = try #require(
+            events.first(where: { $0.kind == .handlerReturned && $0.transactionID == transactionID })
+        )
+        #expect(handlerReturned.metadata["awaitedTXIDs"] == "111")
+
+        let registered = try #require(
+            events.first(where: { $0.kind == .awaitedTokensRegistered && $0.transactionID == transactionID })
+        )
+        #expect(registered.awaitedTXIDs == [111])
+        #expect(registered.metadata["awaitedTXIDs"] == "111")
+    }
+
     @Test("Persisted awaiting-sync transaction re-registers txids without duplicate dispatch")
     func awaitingSyncTransactionDoesNotRedispatchAfterRestart() async throws {
         let storeLocation = TestStoreLocation()

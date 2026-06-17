@@ -474,6 +474,76 @@ struct ElectricSwiftDataBatchApplicationTests {
         #expect(mergeEvent.metadata["txids"] == "401")
         #expect(mergeEvent.metadata["protectedFields"] == "title")
     }
+
+    @Test("Collection synchronizer emits structured server apply trace events")
+    func collectionSynchronizerEmitsStructuredApplyTraceEvents() throws {
+        let container = try makeTestContainer()
+        let context = ModelContext(container)
+        let recorder = TestTraceRecorder()
+        let synchronizer = ElectricCollectionSynchronizer(
+            identifier: testTodoIdentifier,
+            collectionID: "TestTodo:todos",
+            tracer: recorder.tracer()
+        )
+
+        let todo = TestTodo(
+            collectionSyncState: .pendingUpdate,
+            collectionPendingMutationCount: 1,
+            id: "todo-1",
+            projectID: "project-a",
+            title: "Local Title"
+        )
+        context.insert(todo)
+        context.insert(
+            try makePendingMutation(
+                targetKey: "todo-1",
+                payload: testTodoRow(id: "todo-1", projectID: "project-a", title: "Local Title"),
+                changedFields: ["title"],
+                originalRow: testTodoRow(id: "todo-1", projectID: "project-a", title: "Server Title")
+            )
+        )
+        try context.save()
+
+        _ = try synchronizer.apply(
+            ShapeBatch(
+                messages: [
+                    ElectricMessage(
+                        key: "\"public\".\"todos\"/todo-1",
+                        value: testTodoRow(id: "todo-1", projectID: "project-b", title: "Server Title"),
+                        headers: .init(operation: .update, txids: [401])
+                    ),
+                ],
+                state: testShapeState(offset: "12_0"),
+                schema: [:],
+                reachedUpToDate: false
+            ),
+            shapeID: "todos",
+            in: context
+        )
+
+        let traceEvents = recorder.events
+        let rowEvents = traceEvents.filter {
+            $0.kind == .shapeBatchApplied
+                && $0.key == "todo-1"
+                && $0.message == "merged server row into pending local model"
+        }
+        let rowEvent = try #require(rowEvents.first)
+        #expect(rowEvent.observedTXIDs == [401])
+        #expect(rowEvent.offset == "12_0")
+        #expect(rowEvent.metadata["txids"] == "401")
+        #expect(rowEvent.metadata["inboundRow"]?.contains("\"projectID\":\"project-b\"") == true)
+        #expect(rowEvent.metadata["localRowBefore"]?.contains("\"title\":\"Local Title\"") == true)
+        #expect(rowEvent.metadata["appliedRow"]?.contains("\"projectID\":\"project-b\"") == true)
+        #expect(rowEvent.metadata["protectedFields"] == "title")
+        #expect(rowEvent.metadata["finalSyncState"] == "pendingUpdate")
+        #expect(rowEvent.metadata["finalPendingMutationCount"] == "1")
+
+        let batchEvents = traceEvents.filter { $0.kind == .adapterBatchObserved }
+        let batchEvent = try #require(batchEvents.first)
+        #expect(batchEvent.metadata["messages"] == "1")
+        #expect(batchEvent.metadata["observedTXIDs"] == "401")
+        #expect(batchEvent.offset == "12_0")
+    }
 }
 
 @Suite("Electric Shape Store")

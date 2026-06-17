@@ -9,7 +9,7 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
     let collectionSchema: CollectionSchema
     let modelName: String
     let collectionID: String?
-    let writeTracer: CollectionWriteTracer
+    let tracer: CollectionTracer
     let debugLogger: ElectricDebugLogger
 
     private enum UpsertChange {
@@ -34,7 +34,7 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
         collectionSchema: CollectionSchema = .init(),
         modelName: String = String(reflecting: Model.self),
         collectionID: String? = nil,
-        writeTracer: CollectionWriteTracer = .disabled,
+        tracer: CollectionTracer = .disabled,
         debugLogger: ElectricDebugLogger = .disabled
     ) {
         self.identifier = identifier
@@ -42,7 +42,7 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
         self.collectionSchema = collectionSchema
         self.modelName = modelName
         self.collectionID = collectionID
-        self.writeTracer = writeTracer
+        self.tracer = tracer
         self.debugLogger = debugLogger
     }
 
@@ -163,6 +163,19 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
                 "offset": batch.state.offset,
             ]
         )
+        traceShapeBatchApplied(
+            shapeID: shapeID,
+            observedTXIDs: result.observedTXIDs,
+            resolvedTransactionIDs: result.resolvedTransactionIDs,
+            offset: batch.state.offset,
+            metadata: [
+                "messages": String(batch.messages.count),
+                "insertedCount": String(insertedCount),
+                "updatedCount": String(updatedCount),
+                "deletedCount": String(deletedCount),
+                "observedTXIDs": result.observedTXIDs.map(String.init).joined(separator: ","),
+            ]
+        )
         return result
     }
 
@@ -239,6 +252,23 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
                         ]
                     )
                 )
+                traceServerApply(
+                    message: operation == .update ? "merged patch into existing model" : "updated existing model",
+                    shapeID: shapeID,
+                    key: key,
+                    operation: operation,
+                    txids: txids,
+                    offset: batchState.offset,
+                    resolvedTransactionIDs: resolvedTransactionIDs,
+                    metadata: [
+                        "inboundRow": debugString(collectionRow),
+                        "localRowBefore": debugString(localRow),
+                        "appliedRow": debugString(appliedRow),
+                        "outcome": operation == .update ? "mergedPatch" : "updated",
+                        "finalSyncState": String(describing: existing.collectionSyncState),
+                        "finalPendingMutationCount": String(existing.collectionPendingMutationCount),
+                    ]
+                )
             } else {
                 let mergedRow = CollectionRowPatcher.applying(
                     patch: collectionRow,
@@ -262,6 +292,25 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
                             "outcome": "mergedPending",
                         ]
                     )
+                )
+                traceServerApply(
+                    message: "merged server row into pending local model",
+                    shapeID: shapeID,
+                    key: key,
+                    operation: operation,
+                    txids: txids,
+                    offset: batchState.offset,
+                    resolvedTransactionIDs: resolvedTransactionIDs,
+                    metadata: [
+                        "inboundRow": debugString(collectionRow),
+                        "localRowBefore": debugString(localRow),
+                        "appliedRow": debugString(mergedRow),
+                        "pendingMutationCount": String(pending.count),
+                        "protectedFields": protectedFields.sorted().joined(separator: ","),
+                        "outcome": "mergedPending",
+                        "finalSyncState": String(describing: existing.collectionSyncState),
+                        "finalPendingMutationCount": String(existing.collectionPendingMutationCount),
+                    ]
                 )
             }
             return UpsertOutcome(resolvedTransactionIDs: resolvedTransactionIDs, change: .updated)
@@ -297,6 +346,22 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
                     ]
                 )
             )
+            traceServerApply(
+                message: "inserted new model",
+                shapeID: shapeID,
+                key: key,
+                operation: operation,
+                txids: txids,
+                offset: batchState.offset,
+                resolvedTransactionIDs: resolvedTransactionIDs,
+                metadata: [
+                    "inboundRow": debugString(collectionRow),
+                    "appliedRow": debugString(merged),
+                    "outcome": "inserted",
+                    "finalSyncState": String(describing: model.collectionSyncState),
+                    "finalPendingMutationCount": String(model.collectionPendingMutationCount),
+                ]
+            )
         } else {
             applyPendingSummary(pending, to: model)
             logApply(
@@ -314,6 +379,24 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
                         "outcome": "insertedPending",
                     ]
                 )
+            )
+            traceServerApply(
+                message: "inserted model while preserving pending local fields",
+                shapeID: shapeID,
+                key: key,
+                operation: operation,
+                txids: txids,
+                offset: batchState.offset,
+                resolvedTransactionIDs: resolvedTransactionIDs,
+                metadata: [
+                    "inboundRow": debugString(collectionRow),
+                    "appliedRow": debugString(merged),
+                    "pendingMutationCount": String(pending.count),
+                    "protectedFields": protectedFields.sorted().joined(separator: ","),
+                    "outcome": "insertedPending",
+                    "finalSyncState": String(describing: model.collectionSyncState),
+                    "finalPendingMutationCount": String(model.collectionPendingMutationCount),
+                ]
             )
         }
         context.insert(model)
@@ -373,6 +456,16 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
                     ]
                 )
             )
+            traceServerApply(
+                message: "deleted model from SwiftData",
+                shapeID: shapeID,
+                key: key,
+                operation: .delete,
+                txids: txids,
+                offset: offset,
+                resolvedTransactionIDs: resolvedTransactionIDs,
+                metadata: ["outcome": "deleted"]
+            )
         } else {
             logApply(
                 "delete skipped during reconciliation",
@@ -388,6 +481,19 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
                         "outcome": pending.isEmpty ? "missingModel" : "pendingState",
                     ]
                 )
+            )
+            traceServerApply(
+                message: "delete skipped during reconciliation",
+                shapeID: shapeID,
+                key: key,
+                operation: .delete,
+                txids: txids,
+                offset: offset,
+                resolvedTransactionIDs: resolvedTransactionIDs,
+                metadata: [
+                    "pendingMutationCount": String(pending.count),
+                    "outcome": pending.isEmpty ? "missingModel" : "pendingState",
+                ]
             )
         }
         return DeleteOutcome(resolvedTransactionIDs: resolvedTransactionIDs, deleted: deleted)
@@ -415,8 +521,8 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
             mutation.errorMessage = nil
             resolved.insert(mutation.transactionID)
             if let collectionID {
-                writeTracer.record(
-                    CollectionWriteDebugEvent(
+                tracer.record(
+                    CollectionTraceEvent(
                         kind: .mutationResolved,
                         collectionID: collectionID,
                         shapeID: mutation.shapeID,
@@ -552,5 +658,76 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
             metadata[key] = value
         }
         return metadata
+    }
+
+    private func traceServerApply(
+        message: String,
+        shapeID: String,
+        key: String,
+        operation: ElectricOperation,
+        txids: [Int64],
+        offset: String,
+        resolvedTransactionIDs: Set<UUID>,
+        metadata: [String: String]
+    ) {
+        guard let collectionID else { return }
+        var values = metadata
+        values["txids"] = txids.map(String.init).joined(separator: ",")
+        values["observedTXIDs"] = txids.map(String.init).joined(separator: ",")
+        values["offset"] = offset
+        tracer.record(
+            CollectionTraceEvent(
+                kind: .shapeBatchApplied,
+                collectionID: collectionID,
+                shapeID: shapeID,
+                modelName: modelName,
+                key: key,
+                operation: collectionOperation(from: operation),
+                observedTokens: txids.map(String.init),
+                resolvedTransactionIDs: Array(resolvedTransactionIDs).sorted { $0.uuidString < $1.uuidString },
+                offset: offset,
+                message: message,
+                metadata: values
+            )
+        )
+    }
+
+    private func traceShapeBatchApplied(
+        shapeID: String,
+        observedTXIDs: [Int64],
+        resolvedTransactionIDs: [UUID],
+        offset: String,
+        metadata: [String: String]
+    ) {
+        guard let collectionID else { return }
+        tracer.record(
+            CollectionTraceEvent(
+                kind: .adapterBatchObserved,
+                collectionID: collectionID,
+                shapeID: shapeID,
+                modelName: modelName,
+                observedTokens: observedTXIDs.map(String.init),
+                resolvedTransactionIDs: resolvedTransactionIDs.sorted { $0.uuidString < $1.uuidString },
+                offset: offset,
+                message: "applied collection-aware server batch",
+                metadata: metadata
+            )
+        )
+    }
+
+    private func collectionOperation(from operation: ElectricOperation) -> CollectionMutationOperation? {
+        switch operation {
+        case .insert: .create
+        case .update: .update
+        case .delete: .delete
+        }
+    }
+
+    private func debugString<T: Encodable>(_ value: T) -> String {
+        guard let data = try? JSONEncoder().encode(value),
+              let string = String(data: data, encoding: .utf8) else {
+            return String(describing: value)
+        }
+        return string
     }
 }

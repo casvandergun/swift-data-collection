@@ -10,6 +10,12 @@ public enum CollectionDebugLevel: String, Sendable, Codable, Hashable {
     case error
 }
 
+public enum CollectionDiagnosticsLevel: String, Sendable, Codable, Hashable {
+    case off
+    case basic
+    case detailed
+}
+
 public struct CollectionDebugEvent: Sendable {
     public let level: CollectionDebugLevel
     public let category: String
@@ -55,7 +61,17 @@ public struct CollectionDebugLogger: Sendable {
     public static let disabled = CollectionDebugLogger { _ in }
 }
 
-public enum CollectionWriteDebugEventKind: String, Sendable, Codable, Hashable {
+public enum CollectionTraceEventKind: String, Sendable, Codable, Hashable {
+    case bootstrapStarted
+    case bootstrapCompleted
+    case lifecycleChanged
+    case replayScheduled
+    case replayStarted
+    case retryScheduled
+    case retryFired
+    case awaitedTokensRegistered
+    case adapterBatchObserved
+    case pendingStateRefreshed
     case transactionStarted
     case optimisticMutationRecorded
     case mutationMerged
@@ -71,9 +87,9 @@ public enum CollectionWriteDebugEventKind: String, Sendable, Codable, Hashable {
     case transactionFailed
 }
 
-public struct CollectionWriteDebugEvent: Sendable, Hashable {
+public struct CollectionTraceEvent: Sendable, Hashable {
     public let timestamp: Date
-    public let kind: CollectionWriteDebugEventKind
+    public let kind: CollectionTraceEventKind
     public let collectionID: String
     public let shapeID: String
     public let modelName: String
@@ -93,7 +109,7 @@ public struct CollectionWriteDebugEvent: Sendable, Hashable {
 
     public init(
         timestamp: Date = Date(),
-        kind: CollectionWriteDebugEventKind,
+        kind: CollectionTraceEventKind,
         collectionID: String,
         shapeID: String,
         modelName: String,
@@ -131,6 +147,77 @@ public struct CollectionWriteDebugEvent: Sendable, Hashable {
         self.metadata = metadata
     }
 
+    public func filtered(for level: CollectionDiagnosticsLevel) -> CollectionTraceEvent? {
+        switch level {
+        case .off:
+            return nil
+        case .detailed:
+            return self
+        case .basic:
+            return CollectionTraceEvent(
+                timestamp: timestamp,
+                kind: kind,
+                collectionID: collectionID,
+                shapeID: shapeID,
+                modelName: modelName,
+                transactionID: transactionID,
+                key: key,
+                operation: operation,
+                sequenceNumber: sequenceNumber,
+                attemptCount: attemptCount,
+                awaitedTokens: awaitedTokens,
+                observedTokens: observedTokens,
+                resolvedTransactionIDs: resolvedTransactionIDs,
+                offset: offset,
+                pendingMutationCount: pendingMutationCount,
+                message: message,
+                errorDescription: errorDescription,
+                metadata: metadata.filter { Self.basicMetadataKeys.contains($0.key) }
+            )
+        }
+    }
+
+    private static let basicMetadataKeys: Set<String> = [
+        "attemptCount",
+        "awaitedTokens",
+        "awaitedTXIDs",
+        "awaitingTransactions",
+        "collectionID",
+        "completion",
+        "deletedCount",
+        "delay",
+        "error",
+        "expectedRetryAt",
+        "finalPendingMutationCount",
+        "finalSyncState",
+        "from",
+        "insertedCount",
+        "key",
+        "keys",
+        "messages",
+        "modelName",
+        "mutationCount",
+        "nextRetryAt",
+        "observedTokens",
+        "observedTXIDs",
+        "offset",
+        "operation",
+        "outcome",
+        "pendingMutationCount",
+        "protectedFields",
+        "reason",
+        "resolvedTransactionIDs",
+        "sequenceNumber",
+        "shapeID",
+        "status",
+        "to",
+        "transactionCount",
+        "transactionID",
+        "transactionIDs",
+        "txids",
+        "updatedCount",
+    ]
+
     var level: CollectionDebugLevel {
         switch kind {
         case .transactionFailed:
@@ -139,6 +226,10 @@ public struct CollectionWriteDebugEvent: Sendable, Hashable {
             .info
         case .handlerReturned, .awaitingSync:
             .info
+        case .bootstrapStarted, .bootstrapCompleted, .lifecycleChanged,
+             .replayScheduled, .replayStarted, .retryScheduled, .retryFired,
+             .awaitedTokensRegistered, .adapterBatchObserved, .pendingStateRefreshed:
+            .debug
         case .transactionStarted, .optimisticMutationRecorded, .mutationMerged,
              .transactionPersisted, .dispatchEnqueued, .dispatchStarted,
              .handlerInvoked, .mutationResolved:
@@ -147,7 +238,7 @@ public struct CollectionWriteDebugEvent: Sendable, Hashable {
     }
 
     var category: String {
-        "CollectionWritePath"
+        "CollectionTrace"
     }
 
     var summary: String {
@@ -234,29 +325,38 @@ public struct CollectionWriteDebugEvent: Sendable, Hashable {
     }
 }
 
-public struct CollectionWriteTracer: Sendable {
-    private let handler: @Sendable (CollectionWriteDebugEvent) -> Void
+public struct CollectionTracer: Sendable {
+    private let handler: @Sendable (CollectionTraceEvent) -> Void
 
-    public init(handler: @escaping @Sendable (CollectionWriteDebugEvent) -> Void) {
+    public init(handler: @escaping @Sendable (CollectionTraceEvent) -> Void) {
         self.handler = handler
     }
 
-    public func record(_ event: CollectionWriteDebugEvent) {
+    public func record(_ event: CollectionTraceEvent) {
         handler(event)
     }
 
-    public static let disabled = CollectionWriteTracer { _ in }
+    public static let disabled = CollectionTracer { _ in }
+
+    public func filtered(level: CollectionDiagnosticsLevel) -> CollectionTracer {
+        CollectionTracer { event in
+            guard let filteredEvent = event.filtered(for: level) else { return }
+            record(filteredEvent)
+        }
+    }
 
     public static func logger(
         debugLogger: CollectionDebugLogger,
+        level: CollectionDiagnosticsLevel = .detailed,
         subsystem: String = "SwiftDataCollection",
         category: String = "WritePath"
-    ) -> CollectionWriteTracer {
+    ) -> CollectionTracer {
         #if canImport(OSLog)
         let logger = Logger(subsystem: subsystem, category: category)
         #endif
 
-        return CollectionWriteTracer { event in
+        return CollectionTracer { event in
+            guard let event = event.filtered(for: level) else { return }
             debugLogger.log(
                 event.level,
                 category: event.category,
@@ -277,11 +377,57 @@ public struct CollectionWriteTracer: Sendable {
         }
     }
 
-    public static func combining(_ tracers: [CollectionWriteTracer]) -> CollectionWriteTracer {
-        CollectionWriteTracer { event in
+    public static func combining(_ tracers: [CollectionTracer]) -> CollectionTracer {
+        CollectionTracer { event in
             for tracer in tracers {
                 tracer.record(event)
             }
         }
+    }
+}
+
+public struct CollectionDiagnostics: Sendable {
+    public let logger: CollectionDebugLogger
+    public let tracer: CollectionTracer
+    public let level: CollectionDiagnosticsLevel
+
+    public init(
+        logger: CollectionDebugLogger = .disabled,
+        tracer: CollectionTracer = .disabled,
+        level: CollectionDiagnosticsLevel = .off
+    ) {
+        self.logger = logger
+        self.tracer = tracer.filtered(level: level)
+        self.level = level
+    }
+
+    public static let disabled = CollectionDiagnostics()
+
+    public static func logger(
+        _ logger: CollectionDebugLogger,
+        level: CollectionDiagnosticsLevel = .basic,
+        subsystem: String = "SwiftDataCollection",
+        category: String = "WritePath"
+    ) -> CollectionDiagnostics {
+        CollectionDiagnostics(
+            logger: logger,
+            tracer: CollectionTracer.logger(
+                debugLogger: logger,
+                level: level,
+                subsystem: subsystem,
+                category: category
+            ),
+            level: level
+        )
+    }
+
+    public static func handler(
+        level: CollectionDiagnosticsLevel = .detailed,
+        _ handler: @escaping @Sendable (CollectionTraceEvent) -> Void
+    ) -> CollectionDiagnostics {
+        CollectionDiagnostics(
+            tracer: CollectionTracer(handler: handler),
+            level: level
+        )
     }
 }
