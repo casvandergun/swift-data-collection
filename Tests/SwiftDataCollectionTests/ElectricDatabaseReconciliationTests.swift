@@ -731,6 +731,33 @@ struct ElectricDatabaseReconciliationTests {
         #expect(returned.metadata["awaitedTokens"] == "101")
     }
 
+    @Test("OSLog diagnostics do not emit through app logger")
+    func osLogDiagnosticsDoNotEmitThroughAppLogger() async throws {
+        let recorder = TestCollectionDebugRecorder()
+        let appLoggerDiagnostics = CollectionDiagnostics.logger(recorder.logger(), level: .basic)
+        let osLogDiagnostics = CollectionDiagnostics.osLog(level: .basic)
+
+        appLoggerDiagnostics.tracer.record(
+            CollectionTraceEvent(
+                kind: .transactionStarted,
+                collectionID: "collection",
+                shapeID: "shape",
+                modelName: "Model"
+            )
+        )
+        #expect(recorder.events.count == 1)
+
+        osLogDiagnostics.tracer.record(
+            CollectionTraceEvent(
+                kind: .transactionStarted,
+                collectionID: "collection",
+                shapeID: "shape",
+                modelName: "Model"
+            )
+        )
+        #expect(recorder.events.count == 1)
+    }
+
     @Test("Off diagnostics suppress trace events")
     func offDiagnosticsSuppressTraceEvents() async throws {
         let recorder = TestTraceRecorder()

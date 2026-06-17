@@ -345,11 +345,25 @@ public struct CollectionTracer: Sendable {
         }
     }
 
-    public static func logger(
-        debugLogger: CollectionDebugLogger,
-        level: CollectionDiagnosticsLevel = .detailed,
+    public static func debugLogger(
+        _ logger: CollectionDebugLogger,
+        level: CollectionDiagnosticsLevel = .detailed
+    ) -> CollectionTracer {
+        CollectionTracer { event in
+            guard let event = event.filtered(for: level) else { return }
+            logger.log(
+                event.level,
+                category: event.category,
+                message: event.summary,
+                metadata: event.logMetadata
+            )
+        }
+    }
+
+    public static func osLog(
+        level: CollectionDiagnosticsLevel = .basic,
         subsystem: String = "SwiftDataCollection",
-        category: String = "WritePath"
+        category: String = "CollectionTrace"
     ) -> CollectionTracer {
         #if canImport(OSLog)
         let logger = Logger(subsystem: subsystem, category: category)
@@ -357,13 +371,6 @@ public struct CollectionTracer: Sendable {
 
         return CollectionTracer { event in
             guard let event = event.filtered(for: level) else { return }
-            debugLogger.log(
-                event.level,
-                category: event.category,
-                message: event.summary,
-                metadata: event.logMetadata
-            )
-
             #if canImport(OSLog)
             switch event.level {
             case .trace, .debug:
@@ -405,14 +412,22 @@ public struct CollectionDiagnostics: Sendable {
 
     public static func logger(
         _ logger: CollectionDebugLogger,
-        level: CollectionDiagnosticsLevel = .basic,
-        subsystem: String = "SwiftDataCollection",
-        category: String = "WritePath"
+        level: CollectionDiagnosticsLevel = .basic
     ) -> CollectionDiagnostics {
         CollectionDiagnostics(
             logger: logger,
-            tracer: CollectionTracer.logger(
-                debugLogger: logger,
+            tracer: CollectionTracer.debugLogger(logger, level: level),
+            level: level
+        )
+    }
+
+    public static func osLog(
+        level: CollectionDiagnosticsLevel = .basic,
+        subsystem: String = "SwiftDataCollection",
+        category: String = "CollectionTrace"
+    ) -> CollectionDiagnostics {
+        CollectionDiagnostics(
+            tracer: CollectionTracer.osLog(
                 level: level,
                 subsystem: subsystem,
                 category: category
