@@ -36,7 +36,7 @@ public struct FetchCollectionOptions<
     public let scopeID: String
     public let missingRowPolicy: FetchMissingRowPolicy
     public let fetch: FetchCollectionHandler<Model, ID>
-    public let onBatchApplied: CollectionBatchAppliedHandler?
+    public let onApply: CollectionApplyHandler?
     public let onInsert: FetchMutationHandler<Model, ID>?
     public let onUpdate: FetchMutationHandler<Model, ID>?
     public let onDelete: FetchMutationHandler<Model, ID>?
@@ -48,7 +48,7 @@ public struct FetchCollectionOptions<
         modelName: String = String(reflecting: Model.self),
         missingRowPolicy: FetchMissingRowPolicy = .deleteSyncedRows,
         fetch: @escaping FetchCollectionHandler<Model, ID>,
-        onBatchApplied: CollectionBatchAppliedHandler? = nil,
+        onApply: CollectionApplyHandler? = nil,
         onInsert: FetchMutationHandler<Model, ID>? = nil,
         onUpdate: FetchMutationHandler<Model, ID>? = nil,
         onDelete: FetchMutationHandler<Model, ID>? = nil
@@ -59,7 +59,7 @@ public struct FetchCollectionOptions<
         self.scopeID = scopeID
         self.missingRowPolicy = missingRowPolicy
         self.fetch = fetch
-        self.onBatchApplied = onBatchApplied
+        self.onApply = onApply
         self.onInsert = onInsert
         self.onUpdate = onUpdate
         self.onDelete = onDelete
@@ -81,7 +81,7 @@ public struct FetchCollectionOptions<
             identifier: identifier,
             modelName: modelName,
             adapter: adapter,
-            onBatchApplied: onBatchApplied,
+            onApply: onApply,
             onInsert: Self.wrap(onInsert),
             onUpdate: Self.wrap(onUpdate),
             onDelete: Self.wrap(onDelete)
@@ -114,7 +114,7 @@ public func fetchCollectionOptions<
     modelName: String = String(reflecting: Model.self),
     missingRowPolicy: FetchMissingRowPolicy = .deleteSyncedRows,
     fetch: @escaping FetchCollectionHandler<Model, ID>,
-    onBatchApplied: CollectionBatchAppliedHandler? = nil,
+    onApply: CollectionApplyHandler? = nil,
     onInsert: FetchMutationHandler<Model, ID>? = nil,
     onUpdate: FetchMutationHandler<Model, ID>? = nil,
     onDelete: FetchMutationHandler<Model, ID>? = nil
@@ -126,7 +126,7 @@ public func fetchCollectionOptions<
         modelName: modelName,
         missingRowPolicy: missingRowPolicy,
         fetch: fetch,
-        onBatchApplied: onBatchApplied,
+        onApply: onApply,
         onInsert: onInsert,
         onUpdate: onUpdate,
         onDelete: onDelete

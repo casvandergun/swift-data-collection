@@ -32,7 +32,7 @@ public struct ElectricCollectionOptions<Model: SwiftDataCollectionModel, ID: Has
     public let headers: [String: String]
     public let extraParameters: [String: String]
     public let utilities: ElectricCollectionSyncUtilities
-    public let onBatchApplied: CollectionBatchAppliedHandler?
+    public let onApply: CollectionApplyHandler?
     public let onInsert: ElectricMutationHandler<Model, ID>?
     public let onUpdate: ElectricMutationHandler<Model, ID>?
     public let onDelete: ElectricMutationHandler<Model, ID>?
@@ -51,7 +51,7 @@ public struct ElectricCollectionOptions<Model: SwiftDataCollectionModel, ID: Has
         headers: [String: String] = [:],
         extraParameters: [String: String] = [:],
         utilities: ElectricCollectionSyncUtilities = ElectricCollectionSyncUtilities(),
-        onBatchApplied: CollectionBatchAppliedHandler? = nil,
+        onApply: CollectionApplyHandler? = nil,
         onInsert: ElectricMutationHandler<Model, ID>? = nil,
         onUpdate: ElectricMutationHandler<Model, ID>? = nil,
         onDelete: ElectricMutationHandler<Model, ID>? = nil
@@ -74,7 +74,7 @@ public struct ElectricCollectionOptions<Model: SwiftDataCollectionModel, ID: Has
         self.headers = headers
         self.extraParameters = extraParameters
         self.utilities = utilities
-        self.onBatchApplied = onBatchApplied
+        self.onApply = onApply
         self.onInsert = onInsert
         self.onUpdate = onUpdate
         self.onDelete = onDelete
@@ -101,7 +101,7 @@ public struct ElectricCollectionOptions<Model: SwiftDataCollectionModel, ID: Has
             identifier: identifier,
             modelName: modelName,
             adapter: adapter,
-            onBatchApplied: onBatchApplied,
+            onApply: onApply,
             onInsert: Self.wrap(onInsert),
             onUpdate: Self.wrap(onUpdate),
             onDelete: Self.wrap(onDelete)
@@ -153,7 +153,7 @@ public func electricCollectionOptions<Model: SwiftDataCollectionModel, ID: Hasha
     headers: [String: String] = [:],
     extraParameters: [String: String] = [:],
     utilities: ElectricCollectionSyncUtilities = ElectricCollectionSyncUtilities(),
-    onBatchApplied: CollectionBatchAppliedHandler? = nil,
+    onApply: CollectionApplyHandler? = nil,
     onInsert: ElectricMutationHandler<Model, ID>? = nil,
     onUpdate: ElectricMutationHandler<Model, ID>? = nil,
     onDelete: ElectricMutationHandler<Model, ID>? = nil
@@ -171,7 +171,7 @@ public func electricCollectionOptions<Model: SwiftDataCollectionModel, ID: Hasha
         headers: headers,
         extraParameters: extraParameters,
         utilities: utilities,
-        onBatchApplied: onBatchApplied,
+        onApply: onApply,
         onInsert: onInsert,
         onUpdate: onUpdate,
         onDelete: onDelete
@@ -249,7 +249,7 @@ actor ElectricCollectionAdapterRuntime<
                     deletedCount: result.deletedCount,
                     observedTXIDs: result.observedTXIDs
                 )
-                try context.onBatchApplied?(modelContext, summary)
+                try context.onApply?(modelContext, summary)
                 return result
             }
         )

@@ -35,7 +35,7 @@ struct ElectricDatabaseReconciliationTests {
         let pendingBefore = try #require(context.fetch(FetchDescriptor<ElectricPendingMutation>()).first)
         #expect(pendingBefore.status == .awaitingSync)
 
-        async let waitForCompletion: Void = transaction.awaitCompletion()
+        async let waitForCompletion: Void = transaction.wait()
 
         let batch = ShapeBatch(
             messages: [
@@ -125,7 +125,7 @@ struct ElectricDatabaseReconciliationTests {
         }
 
         do {
-            try await transaction.awaitCompletion()
+            try await transaction.wait()
             Issue.record("Expected completion wait to fail")
         } catch {
             #expect(Bool(true))
@@ -177,7 +177,7 @@ struct ElectricDatabaseReconciliationTests {
         }
 
         do {
-            try await transaction.awaitCompletion()
+            try await transaction.wait()
             Issue.record("Expected initial completion wait to fail before autonomous retry")
         } catch {
             #expect(Bool(true))
@@ -382,7 +382,7 @@ struct ElectricDatabaseReconciliationTests {
                 TestTodo.self,
                 identifier: testTodoIdentifier,
                 table: "todos",
-                onBatchApplied: { _, _ in }
+                onApply: { _, _ in }
             )
             Issue.record("Expected duplicate collection with batch callback to conflict")
         } catch ElectricCollectionStoreError.managedShapeConflict(
@@ -463,7 +463,7 @@ struct ElectricDatabaseReconciliationTests {
         #expect(pendingBefore.status == .awaitingSync)
         #expect(pendingBefore.operation == .delete)
 
-        async let waitForCompletion: Void = transaction.awaitCompletion()
+        async let waitForCompletion: Void = transaction.wait()
 
         let batch = ShapeBatch(
             messages: [
@@ -519,7 +519,7 @@ struct ElectricDatabaseReconciliationTests {
         let transaction = try await collection.delete("todo-1")
 
         do {
-            try await transaction.awaitCompletion()
+            try await transaction.wait()
             Issue.record("Expected delete completion wait to fail")
         } catch {
             #expect(Bool(true))
@@ -612,7 +612,7 @@ struct ElectricDatabaseReconciliationTests {
             resolvedTransactionIDs: result.resolvedTransactionIDs
         )
 
-        try await transaction.awaitCompletion()
+        try await transaction.wait()
         let transactionID = await transaction.id
 
         let allEvents = recorder.events

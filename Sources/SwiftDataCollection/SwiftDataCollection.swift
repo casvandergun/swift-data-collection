@@ -75,7 +75,7 @@ public struct CollectionBatchApplySummary: Sendable, Hashable {
     }
 }
 
-public typealias CollectionBatchAppliedHandler =
+public typealias CollectionApplyHandler =
     @Sendable (_ context: ModelContext, _ summary: CollectionBatchApplySummary) throws -> Void
 
 package typealias CollectionAdapterMutationHandler<
@@ -107,7 +107,7 @@ public actor CollectionTransaction {
         statusStorage
     }
 
-    public func awaitCompletion() async throws {
+    public func wait() async throws {
         switch statusStorage {
         case .completed:
             return
@@ -173,7 +173,7 @@ package struct CollectionAdapterContext<
     package let rowDecoder: CollectionRowDecoder
     package let debugLogger: CollectionDebugLogger
     package let writeTracer: CollectionWriteTracer
-    package let onBatchApplied: CollectionBatchAppliedHandler?
+    package let onApply: CollectionApplyHandler?
     package let reportApplied: @Sendable (Set<String>, Date?, String?) async -> Void
     package let reportRefreshCompleted: @Sendable (Date?) async -> Void
     package let reportError: @Sendable (Error) async -> Void
@@ -204,7 +204,7 @@ public struct CollectionOptions<
     public let modelName: String
     public let identifier: CollectionModelIdentifier<Model, ID>
     public let adapter: CollectionAdapter<Model, ID>
-    public let onBatchApplied: CollectionBatchAppliedHandler?
+    public let onApply: CollectionApplyHandler?
     package let onInsert: CollectionAdapterMutationHandler<Model, ID>?
     package let onUpdate: CollectionAdapterMutationHandler<Model, ID>?
     package let onDelete: CollectionAdapterMutationHandler<Model, ID>?
@@ -214,7 +214,7 @@ public struct CollectionOptions<
         identifier: CollectionModelIdentifier<Model, ID>,
         modelName: String = String(reflecting: Model.self),
         adapter: CollectionAdapter<Model, ID>,
-        onBatchApplied: CollectionBatchAppliedHandler? = nil,
+        onApply: CollectionApplyHandler? = nil,
         onInsert: CollectionMutationHandler<Model, ID>? = nil,
         onUpdate: CollectionMutationHandler<Model, ID>? = nil,
         onDelete: CollectionMutationHandler<Model, ID>? = nil
@@ -224,7 +224,7 @@ public struct CollectionOptions<
             identifier: identifier,
             modelName: modelName,
             adapter: adapter,
-            onBatchApplied: onBatchApplied,
+            onApply: onApply,
             onInsert: onInsert.map { handler in
                 { @Sendable context in
                     try await handler(context)
@@ -251,7 +251,7 @@ public struct CollectionOptions<
         identifier: CollectionModelIdentifier<Model, ID>,
         modelName: String = String(reflecting: Model.self),
         adapter: CollectionAdapter<Model, ID>,
-        onBatchApplied: CollectionBatchAppliedHandler? = nil,
+        onApply: CollectionApplyHandler? = nil,
         onInsert: CollectionAdapterMutationHandler<Model, ID>? = nil,
         onUpdate: CollectionAdapterMutationHandler<Model, ID>? = nil,
         onDelete: CollectionAdapterMutationHandler<Model, ID>? = nil
@@ -260,7 +260,7 @@ public struct CollectionOptions<
         self.modelName = modelName
         self.identifier = identifier
         self.adapter = adapter
-        self.onBatchApplied = onBatchApplied
+        self.onApply = onApply
         self.onInsert = onInsert
         self.onUpdate = onUpdate
         self.onDelete = onDelete

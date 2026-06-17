@@ -129,7 +129,7 @@ public actor SwiftDataCollectionStore {
                 )
             }
 
-            guard options.onBatchApplied == nil,
+            guard options.onApply == nil,
                   options.onInsert == nil,
                   options.onUpdate == nil,
                   options.onDelete == nil else {
@@ -181,10 +181,10 @@ public actor SwiftDataCollectionStore {
         return collection
     }
 
-    public func flushPendingMutations() async {
+    public func flush() async {
         await bootstrapIfNeeded()
         for coordinator in coordinatorsByCollectionID.values {
-            await coordinator.flushPendingMutations()
+            await coordinator.flush()
         }
     }
 
@@ -215,7 +215,7 @@ public actor SwiftDataCollectionStore {
         foregroundObserversInstalled = true
         foregroundObserverTokens = foregroundObserverRegistrar {
             Task {
-                await self.flushPendingMutations()
+                await self.flush()
             }
         }
     }
@@ -238,7 +238,7 @@ public actor SwiftDataCollectionStore {
             rowDecoder: rowDecoder,
             debugLogger: debugLogger,
             writeTracer: writeTracer,
-            onBatchApplied: options.onBatchApplied,
+            onApply: options.onApply,
             reportApplied: { observedTokens, lastSyncedAt, offset in
                 await relay.reportApplied(
                     observedTokens: observedTokens,

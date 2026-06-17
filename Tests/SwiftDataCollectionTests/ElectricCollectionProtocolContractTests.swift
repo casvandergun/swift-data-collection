@@ -86,7 +86,7 @@ struct ElectricCollectionProtocolContractTests {
             Issue.record("Expected transaction to remain in progress after unrelated txid")
         }
 
-        async let waitForCompletion: Void = transaction.awaitCompletion()
+        async let waitForCompletion: Void = transaction.wait()
 
         let matchingBatch = testTodoBatch(
             messages: [
@@ -184,7 +184,7 @@ struct ElectricCollectionProtocolContractTests {
             in: context
         )
 
-        async let waitForCompletion: Void = transaction.awaitCompletion()
+        async let waitForCompletion: Void = transaction.wait()
         await database.shapeStoreDidApply(
             batch: secondBatch,
             shapeID: collection.shapeID,

@@ -62,7 +62,7 @@ extension SwiftDataCollectionStore {
         headers: [String: String] = [:],
         extraParameters: [String: String] = [:],
         debugName: String? = nil,
-        onBatchApplied: CollectionBatchAppliedHandler? = nil,
+        onApply: CollectionApplyHandler? = nil,
         onInsert: ElectricMutationHandler<Model, ID>? = nil,
         onUpdate: ElectricMutationHandler<Model, ID>? = nil,
         onDelete: ElectricMutationHandler<Model, ID>? = nil
@@ -80,7 +80,7 @@ extension SwiftDataCollectionStore {
                 replica: replica,
                 headers: headers,
                 extraParameters: extraParameters,
-                onBatchApplied: onBatchApplied,
+                onApply: onApply,
                 onInsert: onInsert,
                 onUpdate: onUpdate,
                 onDelete: onDelete

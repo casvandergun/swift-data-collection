@@ -116,7 +116,7 @@ struct FetchSwiftDataCollectionTests {
             todo.title = "Local"
         }
         do {
-            try await transaction.awaitCompletion()
+            try await transaction.wait()
             Issue.record("Expected failed mutation")
         } catch {
             #expect(Bool(true))
@@ -183,7 +183,7 @@ struct FetchSwiftDataCollectionTests {
         let transaction = try await collection.insert {
             TestTodo(id: "todo-1", projectID: "project-a", title: "Inserted")
         }
-        try await transaction.awaitCompletion()
+        try await transaction.wait()
 
         let context = ModelContext(container)
         let pending = try #require(context.fetch(FetchDescriptor<PendingCollectionMutation>()).first)
@@ -217,7 +217,7 @@ struct FetchSwiftDataCollectionTests {
         }
 
         do {
-            try await transaction.awaitCompletion()
+            try await transaction.wait()
             Issue.record("Expected failed mutation")
         } catch {
             #expect(Bool(true))
@@ -259,7 +259,7 @@ struct FetchSwiftDataCollectionTests {
         let transaction = try await collection.update("todo-1") { todo in
             todo.title = "Local"
         }
-        try await transaction.awaitCompletion()
+        try await transaction.wait()
 
         let context = ModelContext(container)
         let todo = try #require(context.fetch(testTodoIdentifier.fetchDescriptor(for: "todo-1")).first)
@@ -407,7 +407,7 @@ struct FetchSwiftDataCollectionTests {
                 scopeID: "all",
                 identifier: testTodoIdentifier,
                 fetch: { _ in await rows.all() },
-                onBatchApplied: { context, summary in
+                onApply: { context, summary in
                     let currentRows = try context.fetch(FetchDescriptor<TestTodo>())
                     recorder.record(summary: summary, rowCount: currentRows.count)
                     if let first = currentRows.first(where: { $0.id == "todo-1" }) {
@@ -448,7 +448,7 @@ struct FetchSwiftDataCollectionTests {
                 scopeID: "all",
                 identifier: testTodoIdentifier,
                 fetch: { _ in await rows.all() },
-                onBatchApplied: { _, _ in
+                onApply: { _, _ in
                     throw SampleError.hydrationFailed
                 }
             )

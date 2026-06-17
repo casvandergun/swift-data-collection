@@ -13,7 +13,7 @@ actor FetchCollectionAdapterRuntime<
     private let sourceID: String
     private let identifier: CollectionModelIdentifier<Model, ID>
     private let rowDecoder: CollectionRowDecoder
-    private let onBatchApplied: CollectionBatchAppliedHandler?
+    private let onApply: CollectionApplyHandler?
     private let reportRefreshCompleted: @Sendable (Date?) async -> Void
     private let reportError: @Sendable (Error) async -> Void
 
@@ -32,7 +32,7 @@ actor FetchCollectionAdapterRuntime<
         self.sourceID = context.sourceID
         self.identifier = context.identifier
         self.rowDecoder = context.rowDecoder
-        self.onBatchApplied = context.onBatchApplied
+        self.onApply = context.onApply
         self.reportRefreshCompleted = context.reportRefreshCompleted
         self.reportError = context.reportError
     }
@@ -61,7 +61,7 @@ actor FetchCollectionAdapterRuntime<
                 updatedCount: result.updatedCount,
                 deletedCount: result.deletedCount
             )
-            try onBatchApplied?(modelContext, summary)
+            try onApply?(modelContext, summary)
             await reportRefreshCompleted(Date())
         } catch {
             await reportError(error)

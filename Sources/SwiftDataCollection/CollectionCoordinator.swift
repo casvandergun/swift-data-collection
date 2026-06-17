@@ -2,7 +2,7 @@ import Foundation
 import SwiftData
 
 package protocol CollectionRuntime: Actor {
-    func flushPendingMutations() async
+    func flush() async
     func reportAdapterApplied(
         sourceID: String,
         observedTokens: Set<String>,
@@ -133,7 +133,7 @@ actor CollectionCoordinator<
         lifecycleState
     }
 
-    func flushPendingMutations() async {
+    func flush() async {
         await bootstrapIfNeeded()
         await drainDispatchIfNeeded()
     }

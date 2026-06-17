@@ -243,7 +243,7 @@ struct ElectricCollectionRestartTests {
 
         let transaction = try await collection.delete("todo-1")
         do {
-            try await transaction.awaitCompletion()
+            try await transaction.wait()
             Issue.record("Expected delete completion to fail")
         } catch {
             #expect(Bool(true))
@@ -296,7 +296,7 @@ struct ElectricCollectionRestartTests {
             TestTodo(id: "todo-1", projectID: "project-a", title: "Inserted")
         }
         do {
-            try await transaction.awaitCompletion()
+            try await transaction.wait()
             Issue.record("Expected insert completion to fail")
         } catch {
             #expect(Bool(true))

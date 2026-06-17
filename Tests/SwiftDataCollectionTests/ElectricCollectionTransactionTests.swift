@@ -9,7 +9,7 @@ struct ElectricCollectionTransactionTests {
 
         #expect(await transaction.status == .durablyQueued)
 
-        async let waitForCompletion: Void = transaction.awaitCompletion()
+        async let waitForCompletion: Void = transaction.wait()
         await transaction.markSending()
         #expect(await transaction.status == .sending)
         await transaction.markAwaitingSync()
@@ -28,7 +28,7 @@ struct ElectricCollectionTransactionTests {
         let transaction = ElectricCollectionTransaction()
         async let waitForCompletion: Result<Void, Error> = {
             do {
-                try await transaction.awaitCompletion()
+                try await transaction.wait()
                 return .success(())
             } catch {
                 return .failure(error)
