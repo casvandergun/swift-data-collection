@@ -654,14 +654,14 @@ struct ElectricDatabaseReconciliationTests {
         #expect(completed.observedTXIDs == [101])
     }
 
-    @Test("Basic diagnostics omit row payload values but keep txids and ordering metadata")
-    func basicDiagnosticsOmitRowPayloadValues() async throws {
+    @Test("Summary diagnostics omit row payload values but keep txids and ordering metadata")
+    func summaryDiagnosticsOmitRowPayloadValues() async throws {
         let recorder = TestTraceRecorder()
         let container = try makeTestContainer()
         let database = ElectricCollectionStore(
             shapeURL: URL(string: "http://localhost:3000/v1/shape")!,
             modelContainer: container,
-            diagnostics: recorder.diagnostics(level: .basic)
+            diagnostics: recorder.diagnostics(level: .summary)
         )
 
         let collection = try await database.collection(
@@ -692,14 +692,14 @@ struct ElectricDatabaseReconciliationTests {
         #expect(handlerReturned.awaitedTXIDs == [101])
     }
 
-    @Test("Logger diagnostics emit basic metadata")
-    func loggerDiagnosticsEmitBasicMetadata() async throws {
+    @Test("Logger diagnostics emit summary metadata")
+    func loggerDiagnosticsEmitSummaryMetadata() async throws {
         let recorder = TestCollectionDebugRecorder()
         let container = try makeTestContainer()
         let database = ElectricCollectionStore(
             shapeURL: URL(string: "http://localhost:3000/v1/shape")!,
             modelContainer: container,
-            diagnostics: .logger(recorder.logger(), level: .basic)
+            diagnostics: .logger(recorder.logger(), level: .summary)
         )
 
         let collection = try await database.collection(
@@ -734,8 +734,8 @@ struct ElectricDatabaseReconciliationTests {
     @Test("OSLog diagnostics do not emit through app logger")
     func osLogDiagnosticsDoNotEmitThroughAppLogger() async throws {
         let recorder = TestCollectionDebugRecorder()
-        let appLoggerDiagnostics = CollectionDiagnostics.logger(recorder.logger(), level: .basic)
-        let osLogDiagnostics = CollectionDiagnostics.osLog(level: .basic)
+        let appLoggerDiagnostics = CollectionDiagnostics.logger(recorder.logger(), level: .summary)
+        let osLogDiagnostics = CollectionDiagnostics.osLog(level: .summary)
 
         appLoggerDiagnostics.tracer.record(
             CollectionTraceEvent(
@@ -756,6 +756,52 @@ struct ElectricDatabaseReconciliationTests {
             )
         )
         #expect(recorder.events.count == 1)
+    }
+
+    @Test("Debug diagnostics suppress Electric trace events")
+    func debugDiagnosticsSuppressElectricTraceEvents() {
+        let recorder = TestCollectionDebugRecorder()
+        let diagnostics = CollectionDiagnostics.logger(recorder.logger(), level: .debug)
+
+        diagnostics.logger.electricDebugLogger.log(
+            .trace,
+            category: "ShapeStream",
+            message: "parsed SSE chunk",
+            metadata: ["bytes": "1", "events": "0"]
+        )
+        diagnostics.logger.electricDebugLogger.log(
+            .debug,
+            category: "ShapeStream",
+            message: "received SSE event",
+            metadata: ["bytes": "42"]
+        )
+
+        #expect(recorder.events.map(\.message) == ["received SSE event"])
+    }
+
+    @Test("Trace diagnostics emit Electric trace events")
+    func traceDiagnosticsEmitElectricTraceEvents() {
+        let recorder = TestCollectionDebugRecorder()
+        let diagnostics = CollectionDiagnostics.logger(recorder.logger(), level: .trace)
+
+        diagnostics.logger.electricDebugLogger.log(
+            .trace,
+            category: "ShapeStream",
+            message: "parsed SSE chunk",
+            metadata: ["bytes": "1", "events": "0"]
+        )
+
+        let event = recorder.events.first
+        #expect(event?.category == "ShapeStream")
+        #expect(event?.message == "parsed SSE chunk")
+        #expect(event?.metadata["bytes"] == "1")
+        #expect(event?.metadata["events"] == "0")
+    }
+
+    @Test("Deprecated diagnostics aliases preserve legacy behavior")
+    func deprecatedDiagnosticsAliasesPreserveLegacyBehavior() throws {
+        #expect(try JSONDecoder().decode(CollectionDiagnosticsLevel.self, from: Data("\"basic\"".utf8)) == .summary)
+        #expect(try JSONDecoder().decode(CollectionDiagnosticsLevel.self, from: Data("\"detailed\"".utf8)) == .debug)
     }
 
     @Test("Off diagnostics suppress trace events")

@@ -12,8 +12,40 @@ public enum CollectionDebugLevel: String, Sendable, Codable, Hashable {
 
 public enum CollectionDiagnosticsLevel: String, Sendable, Codable, Hashable {
     case off
-    case basic
-    case detailed
+    case summary
+    case debug
+    case trace
+
+    @available(*, deprecated, renamed: "summary")
+    public static let basic: CollectionDiagnosticsLevel = .summary
+
+    @available(*, deprecated, renamed: "debug")
+    public static let detailed: CollectionDiagnosticsLevel = .debug
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let rawValue = try container.decode(String.self)
+        switch rawValue {
+        case "off":
+            self = .off
+        case "summary", "basic":
+            self = .summary
+        case "debug", "detailed":
+            self = .debug
+        case "trace":
+            self = .trace
+        default:
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Invalid CollectionDiagnosticsLevel value: \(rawValue)"
+            )
+        }
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
 }
 
 public struct CollectionDebugEvent: Sendable {
@@ -59,6 +91,18 @@ public struct CollectionDebugLogger: Sendable {
     }
 
     public static let disabled = CollectionDebugLogger { _ in }
+
+    public func filtered(level: CollectionDiagnosticsLevel) -> CollectionDebugLogger {
+        CollectionDebugLogger { event in
+            guard level.includes(event.level) else { return }
+            log(
+                event.level,
+                category: event.category,
+                message: event.message,
+                metadata: event.metadata
+            )
+        }
+    }
 }
 
 public enum CollectionTraceEventKind: String, Sendable, Codable, Hashable {
@@ -151,9 +195,9 @@ public struct CollectionTraceEvent: Sendable, Hashable {
         switch level {
         case .off:
             return nil
-        case .detailed:
+        case .debug, .trace:
             return self
-        case .basic:
+        case .summary:
             return CollectionTraceEvent(
                 timestamp: timestamp,
                 kind: kind,
@@ -347,7 +391,7 @@ public struct CollectionTracer: Sendable {
 
     public static func debugLogger(
         _ logger: CollectionDebugLogger,
-        level: CollectionDiagnosticsLevel = .detailed
+        level: CollectionDiagnosticsLevel = .debug
     ) -> CollectionTracer {
         CollectionTracer { event in
             guard let event = event.filtered(for: level) else { return }
@@ -361,7 +405,7 @@ public struct CollectionTracer: Sendable {
     }
 
     public static func osLog(
-        level: CollectionDiagnosticsLevel = .basic,
+        level: CollectionDiagnosticsLevel = .summary,
         subsystem: String = "SwiftDataCollection",
         category: String = "CollectionTrace"
     ) -> CollectionTracer {
@@ -403,7 +447,7 @@ public struct CollectionDiagnostics: Sendable {
         tracer: CollectionTracer = .disabled,
         level: CollectionDiagnosticsLevel = .off
     ) {
-        self.logger = logger
+        self.logger = logger.filtered(level: level)
         self.tracer = tracer.filtered(level: level)
         self.level = level
     }
@@ -412,7 +456,7 @@ public struct CollectionDiagnostics: Sendable {
 
     public static func logger(
         _ logger: CollectionDebugLogger,
-        level: CollectionDiagnosticsLevel = .basic
+        level: CollectionDiagnosticsLevel = .summary
     ) -> CollectionDiagnostics {
         CollectionDiagnostics(
             logger: logger,
@@ -422,7 +466,7 @@ public struct CollectionDiagnostics: Sendable {
     }
 
     public static func osLog(
-        level: CollectionDiagnosticsLevel = .basic,
+        level: CollectionDiagnosticsLevel = .summary,
         subsystem: String = "SwiftDataCollection",
         category: String = "CollectionTrace"
     ) -> CollectionDiagnostics {
@@ -437,12 +481,27 @@ public struct CollectionDiagnostics: Sendable {
     }
 
     public static func handler(
-        level: CollectionDiagnosticsLevel = .detailed,
+        level: CollectionDiagnosticsLevel = .debug,
         _ handler: @escaping @Sendable (CollectionTraceEvent) -> Void
     ) -> CollectionDiagnostics {
         CollectionDiagnostics(
             tracer: CollectionTracer(handler: handler),
             level: level
         )
+    }
+}
+
+private extension CollectionDiagnosticsLevel {
+    func includes(_ debugLevel: CollectionDebugLevel) -> Bool {
+        switch self {
+        case .off:
+            return false
+        case .summary:
+            return debugLevel == .info || debugLevel == .error
+        case .debug:
+            return debugLevel == .debug || debugLevel == .info || debugLevel == .error
+        case .trace:
+            return true
+        }
     }
 }

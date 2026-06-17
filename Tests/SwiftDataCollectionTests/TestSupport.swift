@@ -688,7 +688,7 @@ final class TestTraceRecorder: @unchecked Sendable {
         }
     }
 
-    func diagnostics(level: CollectionDiagnosticsLevel = .detailed) -> CollectionDiagnostics {
+    func diagnostics(level: CollectionDiagnosticsLevel = .debug) -> CollectionDiagnostics {
         CollectionDiagnostics.handler(level: level) { [weak self] event in
             self?.record(event)
         }
