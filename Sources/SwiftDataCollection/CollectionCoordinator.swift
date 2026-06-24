@@ -427,26 +427,51 @@ actor CollectionCoordinator<
         guard let transactionRecord else { return }
         guard transactionRecord.status == .pending || transactionRecord.status == .failed else { return }
         guard transactionRecord.nextRetryAt.map({ $0 <= Date() }) ?? true else { return }
+        guard queue.hasUnresolvedPredecessor(for: transactionRecord, collectionID: collectionID) == false else {
+            trace(
+                .dispatchEnqueued,
+                transactionID: id,
+                sequenceNumber: transactionRecord.sequenceNumber,
+                attemptCount: transactionRecord.attemptCount,
+                message: "deferred dispatch behind earlier same-key transaction",
+                metadata: transactionTraceMetadata(transactionRecord)
+            )
+            return
+        }
 
         let pendingMutations = queue.fetchPendingMutations(transactionID: id)
         guard pendingMutations.isEmpty == false else { return }
+        let compactedDispatch = compactPendingSuccessors(
+            for: transactionRecord,
+            pendingMutations: pendingMutations
+        )
+        let representedTransactions = [transactionRecord] + compactedDispatch.transactions
+        let representedTransactionIDs = representedTransactions.map(\.id)
+        let stateMutations = pendingMutations + compactedDispatch.mutations
+        let touchedKeys = Set(stateMutations.map(\.targetKey))
 
-        transactionRecord.status = .sending
-        transactionRecord.recordAttempt()
-        transactionRecord.lastErrorMessage = nil
-        transactionRecord.nextRetryAt = nil
-        for mutation in pendingMutations {
+        for transaction in representedTransactions {
+            transaction.status = .sending
+            transaction.recordAttempt()
+            transaction.lastErrorMessage = nil
+            transaction.nextRetryAt = nil
+        }
+        for mutation in stateMutations {
             mutation.status = .sending
             mutation.recordAttempt()
             mutation.errorMessage = nil
             mutation.nextRetryAt = nil
         }
         try? queue.saveContext()
-        refreshPendingModelStates(keys: Set(pendingMutations.map(\.targetKey)))
+        refreshPendingModelStates(keys: touchedKeys)
 
         let transaction = liveTransactions[id] ?? CollectionTransaction(id: id, collectionID: collectionID)
         liveTransactions[id] = transaction
-        await transaction.markSending()
+        for transactionID in representedTransactionIDs {
+            let liveTransaction = liveTransactions[transactionID] ?? CollectionTransaction(id: transactionID, collectionID: collectionID)
+            liveTransactions[transactionID] = liveTransaction
+            await liveTransaction.markSending()
+        }
         trace(
             .dispatchStarted,
             transactionID: id,
@@ -465,82 +490,112 @@ actor CollectionCoordinator<
             switch completion {
             case .immediate:
                 let immediateCompletion: CollectionMutationCompletion = .immediate
-                transactionRecord.setCompletion(immediateCompletion)
-                reconciler.resolveTransaction(id: id, collectionID: collectionID)
-                try queue.saveContext()
-                refreshPendingModelStates(keys: Set(pendingMutations.map(\.targetKey)))
-                if let liveTransaction = liveTransactions.removeValue(forKey: id) {
-                    await liveTransaction.complete()
+                for representedTransaction in representedTransactions {
+                    representedTransaction.setCompletion(immediateCompletion)
+                    reconciler.resolveTransaction(id: representedTransaction.id, collectionID: collectionID)
                 }
-                trace(
-                    .transactionCompleted,
-                    transactionID: id,
-                    sequenceNumber: transactionRecord.sequenceNumber,
-                    attemptCount: transactionRecord.attemptCount,
-                    message: "completed transaction immediately"
-                )
+                try queue.saveContext()
+                refreshPendingModelStates(keys: touchedKeys)
+                for representedTransaction in representedTransactions {
+                    if let liveTransaction = liveTransactions.removeValue(forKey: representedTransaction.id) {
+                        await liveTransaction.complete()
+                    }
+                    trace(
+                        .transactionCompleted,
+                        transactionID: representedTransaction.id,
+                        sequenceNumber: representedTransaction.sequenceNumber,
+                        attemptCount: representedTransaction.attemptCount,
+                        message: representedTransaction.id == id
+                            ? "completed transaction immediately"
+                            : "completed compacted transaction immediately"
+                    )
+                }
 
             case .awaitTokens(let tokens):
                 guard tokens.isEmpty == false else {
                     throw CollectionError.missingAwaitedObservationTokens
                 }
 
-                transactionRecord.setCompletion(.awaitTokens(tokens))
-                transactionRecord.status = .awaitingSync
-                transactionRecord.lastErrorMessage = nil
-                for mutation in pendingMutations {
+                for representedTransaction in representedTransactions {
+                    representedTransaction.setCompletion(.awaitTokens(tokens))
+                    representedTransaction.status = .awaitingSync
+                    representedTransaction.lastErrorMessage = nil
+                }
+                for mutation in stateMutations {
                     mutation.status = .awaitingSync
                     mutation.errorMessage = nil
                 }
                 try queue.saveContext()
-                refreshPendingModelStates(keys: Set(pendingMutations.map(\.targetKey)))
+                refreshPendingModelStates(keys: touchedKeys)
 
-                register(transactionID: id, awaiting: tokens)
-                await transaction.markAwaitingSync()
-                trace(
-                    .awaitingSync,
-                    transactionID: id,
-                    sequenceNumber: transactionRecord.sequenceNumber,
-                    attemptCount: transactionRecord.attemptCount,
-                    awaitedTokens: tokens.map(tokenString).sorted(),
-                    pendingMutationCount: pendingMutations.count,
-                    message: "awaiting observation tokens from adapter"
-                )
+                for representedTransaction in representedTransactions {
+                    register(transactionID: representedTransaction.id, awaiting: tokens)
+                    if let liveTransaction = liveTransactions[representedTransaction.id] {
+                        await liveTransaction.markAwaitingSync()
+                    }
+                    trace(
+                        .awaitingSync,
+                        transactionID: representedTransaction.id,
+                        sequenceNumber: representedTransaction.sequenceNumber,
+                        attemptCount: representedTransaction.attemptCount,
+                        awaitedTokens: tokens.map(tokenString).sorted(),
+                        pendingMutationCount: representedTransaction.id == id
+                            ? pendingMutations.count
+                            : queue.fetchPendingMutations(transactionID: representedTransaction.id).count,
+                        message: representedTransaction.id == id
+                            ? "awaiting observation tokens from adapter"
+                            : "awaiting observation tokens from compacted adapter dispatch"
+                    )
+                }
 
             case .refresh:
                 let refreshCompletion: CollectionMutationCompletion = .refresh
-                transactionRecord.setCompletion(refreshCompletion)
-                transactionRecord.status = .awaitingSync
-                transactionRecord.lastErrorMessage = nil
-                for mutation in pendingMutations {
+                for representedTransaction in representedTransactions {
+                    representedTransaction.setCompletion(refreshCompletion)
+                    representedTransaction.status = .awaitingSync
+                    representedTransaction.lastErrorMessage = nil
+                }
+                for mutation in stateMutations {
                     mutation.status = .awaitingSync
                     mutation.errorMessage = nil
                 }
                 try queue.saveContext()
-                refreshPendingModelStates(keys: Set(pendingMutations.map(\.targetKey)))
-                awaitingRefreshTransactionIDs.insert(id)
-                await transaction.markAwaitingSync()
-                trace(
-                    .awaitingSync,
-                    transactionID: id,
-                    sequenceNumber: transactionRecord.sequenceNumber,
-                    attemptCount: transactionRecord.attemptCount,
-                    pendingMutationCount: pendingMutations.count,
-                    message: "awaiting adapter refresh completion"
-                )
+                refreshPendingModelStates(keys: touchedKeys)
+                for representedTransaction in representedTransactions {
+                    awaitingRefreshTransactionIDs.insert(representedTransaction.id)
+                    if let liveTransaction = liveTransactions[representedTransaction.id] {
+                        await liveTransaction.markAwaitingSync()
+                    }
+                    trace(
+                        .awaitingSync,
+                        transactionID: representedTransaction.id,
+                        sequenceNumber: representedTransaction.sequenceNumber,
+                        attemptCount: representedTransaction.attemptCount,
+                        pendingMutationCount: representedTransaction.id == id
+                            ? pendingMutations.count
+                            : queue.fetchPendingMutations(transactionID: representedTransaction.id).count,
+                        message: representedTransaction.id == id
+                            ? "awaiting adapter refresh completion"
+                            : "awaiting adapter refresh completion from compacted dispatch"
+                    )
+                }
                 await adapterRuntime.refresh()
             }
         } catch {
-            transactionRecord.markFailed(error, retryPolicy: retryPolicy)
-            for mutation in pendingMutations {
+            for representedTransaction in representedTransactions {
+                representedTransaction.markFailed(error, retryPolicy: retryPolicy)
+            }
+            for mutation in stateMutations {
                 mutation.markFailed(error, retryPolicy: retryPolicy)
             }
             try? queue.saveContext()
 
-            refreshPendingModelStates(keys: Set(pendingMutations.map(\.targetKey)))
+            refreshPendingModelStates(keys: touchedKeys)
 
-            if let liveTransaction = liveTransactions.removeValue(forKey: id) {
-                await liveTransaction.fail(error)
+            for representedTransactionID in representedTransactionIDs {
+                if let liveTransaction = liveTransactions.removeValue(forKey: representedTransactionID) {
+                    await liveTransaction.fail(error)
+                }
             }
 
             await transitionLifecycle(
@@ -638,6 +693,80 @@ actor CollectionCoordinator<
             preparedTransaction.mutations,
             transactionID: preparedTransaction.transactionID,
             in: context
+        )
+    }
+
+    private struct CompactedDispatch {
+        let transactions: [PendingCollectionTransaction]
+        let mutations: [PendingCollectionMutation]
+    }
+
+    private func compactPendingSuccessors(
+        for transaction: PendingCollectionTransaction,
+        pendingMutations: [PendingCollectionMutation]
+    ) -> CompactedDispatch {
+        guard pendingMutations.count == 1,
+              let baseMutation = pendingMutations.first,
+              baseMutation.operation == .create || baseMutation.operation == .update else {
+            return CompactedDispatch(transactions: [], mutations: [])
+        }
+
+        let successors = queue.compactableSuccessorTransactions(
+            after: transaction,
+            collectionID: collectionID,
+            targetKey: baseMutation.targetKey,
+            operation: .update,
+            now: Date()
+        )
+        guard successors.isEmpty == false else {
+            return CompactedDispatch(transactions: [], mutations: [])
+        }
+
+        var latestPayload = baseMutation.payload
+        var latestMetadata = baseMutation.metadata
+        var compactedTransactions: [PendingCollectionTransaction] = []
+        var compactedMutations: [PendingCollectionMutation] = []
+
+        for successor in successors {
+            latestPayload = successor.mutation.payload
+            if successor.mutation.metadata.isEmpty == false {
+                latestMetadata = successor.mutation.metadata
+            }
+            compactedTransactions.append(successor.transaction)
+            compactedMutations.append(successor.mutation)
+        }
+
+        baseMutation.payload = latestPayload
+        baseMutation.metadata = latestMetadata
+        switch baseMutation.operation {
+        case .create:
+            baseMutation.changedFields = Set(latestPayload.keys)
+        case .update:
+            baseMutation.changedFields = changedFields(
+                from: baseMutation.originalRow ?? [:],
+                to: latestPayload
+            )
+        case .delete:
+            break
+        }
+
+        trace(
+            .mutationMerged,
+            transactionID: transaction.id,
+            key: baseMutation.targetKey,
+            operation: baseMutation.operation,
+            pendingMutationCount: compactedMutations.count + 1,
+            message: "compacted pending same-key updates into outbound \(baseMutation.operation.rawValue)",
+            metadata: [
+                "compactedTransactionIDs": compactedTransactions.map(\.id.uuidString).joined(separator: ","),
+                "compactedMutationCount": String(compactedMutations.count),
+                "changedFields": baseMutation.changedFields.sorted().joined(separator: ","),
+            ]
+        )
+
+        return CompactedDispatch(
+            transactions: compactedTransactions,
+            mutations: compactedMutations
         )
     }
 
@@ -944,6 +1073,12 @@ actor CollectionCoordinator<
             return String(describing: value)
         }
         return string
+    }
+
+    private func changedFields(from original: CollectionRow, to modified: CollectionRow) -> Set<String> {
+        Set(modified.compactMap { key, value in
+            original[key] == value ? nil : key
+        })
     }
 
     private func lifecycleDebugString(_ state: CollectionLifecycleState) -> String {

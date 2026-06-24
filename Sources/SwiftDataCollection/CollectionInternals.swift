@@ -243,6 +243,9 @@ struct CollectionMutationQueue {
                 transaction.status == .pending ||
                 transaction.status == .failed && (transaction.nextRetryAt == nil || transaction.nextRetryAt! <= now)
             }
+            .filter { transaction in
+                hasUnresolvedPredecessor(for: transaction, collectionID: collectionID) == false
+            }
             .map(\.id)
     }
 
@@ -261,6 +264,75 @@ struct CollectionMutationQueue {
 
     func nextTransactionSequenceNumber(collectionID: String) -> Int {
         (fetchAllPendingTransactions(collectionID: collectionID).map(\.sequenceNumber).max() ?? 0) + 1
+    }
+
+    func hasUnresolvedPredecessor(
+        for transaction: PendingCollectionTransaction,
+        collectionID: String
+    ) -> Bool {
+        let currentKeys = Set(fetchPendingMutations(transactionID: transaction.id).map(\.targetKey))
+        guard currentKeys.isEmpty == false else { return false }
+
+        return fetchAllPendingTransactions(collectionID: collectionID)
+            .filter { isEarlier($0, than: transaction) }
+            .filter(Self.isUnresolved)
+            .contains { earlier in
+                let earlierKeys = Set(fetchPendingMutations(transactionID: earlier.id).map(\.targetKey))
+                return earlierKeys.isDisjoint(with: currentKeys) == false
+            }
+    }
+
+    func compactableSuccessorTransactions(
+        after transaction: PendingCollectionTransaction,
+        collectionID: String,
+        targetKey: String,
+        operation: CollectionMutationOperation,
+        now: Date
+    ) -> [(transaction: PendingCollectionTransaction, mutation: PendingCollectionMutation)] {
+        var compactable: [(transaction: PendingCollectionTransaction, mutation: PendingCollectionMutation)] = []
+
+        for successor in fetchAllPendingTransactions(collectionID: collectionID)
+            .filter({ isEarlier(transaction, than: $0) }) {
+            guard successor.status == .pending ||
+                  successor.status == .failed && (successor.nextRetryAt == nil || successor.nextRetryAt! <= now) else {
+                continue
+            }
+
+            let mutations = fetchPendingMutations(transactionID: successor.id)
+            guard mutations.contains(where: { $0.targetKey == targetKey }) else {
+                continue
+            }
+
+            guard mutations.count == 1,
+                  let mutation = mutations.first,
+                  mutation.operation == operation,
+                  mutation.status == .pending ||
+                  mutation.status == .failed && (mutation.nextRetryAt == nil || mutation.nextRetryAt! <= now) else {
+                break
+            }
+            compactable.append((successor, mutation))
+        }
+
+        return compactable
+    }
+
+    private static func isUnresolved(_ transaction: PendingCollectionTransaction) -> Bool {
+        switch transaction.status {
+        case .pending, .sending, .awaitingSync, .failed:
+            true
+        case .resolved, .conflicted:
+            false
+        }
+    }
+
+    private func isEarlier(
+        _ lhs: PendingCollectionTransaction,
+        than rhs: PendingCollectionTransaction
+    ) -> Bool {
+        if lhs.sequenceNumber == rhs.sequenceNumber {
+            return lhs.createdAt < rhs.createdAt
+        }
+        return lhs.sequenceNumber < rhs.sequenceNumber
     }
 
     func fetchOrCreateCollectionMetadata(
@@ -588,6 +660,7 @@ public final class CollectionTransactionBuilder<Model: SwiftDataCollectionModel,
         try mutate(model)
         let modified = try model.collectionRow()
         let changes = Self.rowDiff(from: original, to: modified)
+        guard changes.isEmpty == false else { return }
 
         let mutation = CollectionMutation(
             operation: .update,
