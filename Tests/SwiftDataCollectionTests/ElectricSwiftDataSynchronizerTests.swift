@@ -534,6 +534,7 @@ struct ElectricSwiftDataBatchApplicationTests {
         #expect(rowEvent.metadata["inboundRow"]?.contains("\"projectID\":\"project-b\"") == true)
         #expect(rowEvent.metadata["localRowBefore"]?.contains("\"title\":\"Local Title\"") == true)
         #expect(rowEvent.metadata["appliedRow"]?.contains("\"projectID\":\"project-b\"") == true)
+        #expect(rowEvent.metadata["changedFields"] == "id,projectID,title")
         #expect(rowEvent.metadata["protectedFields"] == "title")
         #expect(rowEvent.metadata["finalSyncState"] == "pendingUpdate")
         #expect(rowEvent.metadata["finalPendingMutationCount"] == "1")

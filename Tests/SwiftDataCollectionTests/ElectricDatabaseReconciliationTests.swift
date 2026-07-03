@@ -798,6 +798,97 @@ struct ElectricDatabaseReconciliationTests {
         #expect(event?.metadata["events"] == "0")
     }
 
+    @Test("Collection apply diagnostics separate summary debug and trace payloads")
+    func collectionApplyDiagnosticsSeparateSummaryDebugAndTracePayloads() throws {
+        let metadata = [
+            "txids": "401",
+            "changedFields": "projectID,title",
+            "protectedFields": "title",
+            "finalSyncState": "pendingUpdate",
+            "finalPendingMutationCount": "1",
+            "inboundRow": "{\"projectID\":\"project-b\",\"title\":\"Server Title\"}",
+            "localRowBefore": "{\"projectID\":\"project-a\",\"title\":\"Local Title\"}",
+            "appliedRow": "{\"projectID\":\"project-b\",\"title\":\"Local Title\"}",
+        ]
+        let event = CollectionTraceEvent(
+            kind: .shapeBatchApplied,
+            collectionID: "TestTodo:todos",
+            shapeID: "todos",
+            modelName: "TestTodo",
+            key: "todo-1",
+            operation: .update,
+            observedTokens: ["401"],
+            offset: "12_0",
+            message: "merged server row into pending local model",
+            metadata: metadata
+        )
+
+        let summaryRecorder = TestCollectionDebugRecorder()
+        CollectionDiagnostics.logger(summaryRecorder.logger(), level: .summary).tracer.record(event)
+        let summaryEvent = try #require(summaryRecorder.events.first)
+        #expect(summaryEvent.level == .info)
+        #expect(summaryEvent.metadata["changedFields"] == "projectID,title")
+        #expect(summaryEvent.metadata["finalSyncState"] == "pendingUpdate")
+        #expect(summaryEvent.metadata["finalPendingMutationCount"] == "1")
+        #expect(summaryEvent.metadata["inboundRow"] == nil)
+        #expect(summaryEvent.metadata["localRowBefore"] == nil)
+        #expect(summaryEvent.metadata["appliedRow"] == nil)
+
+        let debugRecorder = TestCollectionDebugRecorder()
+        CollectionDiagnostics.logger(debugRecorder.logger(), level: .debug).tracer.record(event)
+        let debugEvent = try #require(debugRecorder.events.first)
+        #expect(debugEvent.level == .info)
+        #expect(debugEvent.metadata["changedFields"] == "projectID,title")
+        #expect(debugEvent.metadata["protectedFields"] == "title")
+        #expect(debugEvent.metadata["inboundRow"] == nil)
+        #expect(debugEvent.metadata["localRowBefore"] == nil)
+        #expect(debugEvent.metadata["appliedRow"] == nil)
+
+        let traceRecorder = TestCollectionDebugRecorder()
+        CollectionDiagnostics.logger(traceRecorder.logger(), level: .trace).tracer.record(event)
+        let traceEvent = try #require(traceRecorder.events.first)
+        #expect(traceEvent.metadata["changedFields"] == "projectID,title")
+        #expect(traceEvent.metadata["inboundRow"]?.contains("\"projectID\":\"project-b\"") == true)
+        #expect(traceEvent.metadata["localRowBefore"]?.contains("\"title\":\"Local Title\"") == true)
+        #expect(traceEvent.metadata["appliedRow"]?.contains("\"projectID\":\"project-b\"") == true)
+    }
+
+    @Test("Handler diagnostics filter collection apply payloads consistently")
+    func handlerDiagnosticsFilterCollectionApplyPayloadsConsistently() throws {
+        let event = CollectionTraceEvent(
+            kind: .shapeBatchApplied,
+            collectionID: "TestTodo:todos",
+            shapeID: "todos",
+            modelName: "TestTodo",
+            key: "todo-1",
+            operation: .update,
+            observedTokens: ["401"],
+            offset: "12_0",
+            metadata: [
+                "changedFields": "projectID,title",
+                "inboundRow": "{\"projectID\":\"project-b\"}",
+                "localRowBefore": "{\"projectID\":\"project-a\"}",
+                "appliedRow": "{\"projectID\":\"project-b\"}",
+            ]
+        )
+
+        let debugRecorder = TestTraceRecorder()
+        debugRecorder.diagnostics(level: .debug).tracer.record(event)
+        let debugEvent = try #require(debugRecorder.events.first)
+        #expect(debugEvent.metadata["changedFields"] == "projectID,title")
+        #expect(debugEvent.metadata["inboundRow"] == nil)
+        #expect(debugEvent.metadata["localRowBefore"] == nil)
+        #expect(debugEvent.metadata["appliedRow"] == nil)
+
+        let traceRecorder = TestTraceRecorder()
+        traceRecorder.diagnostics(level: .trace).tracer.record(event)
+        let traceEvent = try #require(traceRecorder.events.first)
+        #expect(traceEvent.metadata["changedFields"] == "projectID,title")
+        #expect(traceEvent.metadata["inboundRow"]?.contains("\"projectID\":\"project-b\"") == true)
+        #expect(traceEvent.metadata["localRowBefore"]?.contains("\"projectID\":\"project-a\"") == true)
+        #expect(traceEvent.metadata["appliedRow"]?.contains("\"projectID\":\"project-b\"") == true)
+    }
+
     @Test("Deprecated diagnostics aliases preserve legacy behavior")
     func deprecatedDiagnosticsAliasesPreserveLegacyBehavior() throws {
         #expect(try JSONDecoder().decode(CollectionDiagnosticsLevel.self, from: Data("\"basic\"".utf8)) == .summary)

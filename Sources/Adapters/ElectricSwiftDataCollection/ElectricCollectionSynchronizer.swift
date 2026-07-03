@@ -264,6 +264,7 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
                         "inboundRow": debugString(collectionRow),
                         "localRowBefore": debugString(localRow),
                         "appliedRow": debugString(appliedRow),
+                        "changedFields": changedFields(for: collectionRow),
                         "outcome": operation == .update ? "mergedPatch" : "updated",
                         "finalSyncState": String(describing: existing.collectionSyncState),
                         "finalPendingMutationCount": String(existing.collectionPendingMutationCount),
@@ -305,6 +306,7 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
                         "inboundRow": debugString(collectionRow),
                         "localRowBefore": debugString(localRow),
                         "appliedRow": debugString(mergedRow),
+                        "changedFields": changedFields(for: collectionRow),
                         "pendingMutationCount": String(pending.count),
                         "protectedFields": protectedFields.sorted().joined(separator: ","),
                         "outcome": "mergedPending",
@@ -357,6 +359,7 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
                 metadata: [
                     "inboundRow": debugString(collectionRow),
                     "appliedRow": debugString(merged),
+                    "changedFields": changedFields(for: collectionRow),
                     "outcome": "inserted",
                     "finalSyncState": String(describing: model.collectionSyncState),
                     "finalPendingMutationCount": String(model.collectionPendingMutationCount),
@@ -391,6 +394,7 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
                 metadata: [
                     "inboundRow": debugString(collectionRow),
                     "appliedRow": debugString(merged),
+                    "changedFields": changedFields(for: collectionRow),
                     "pendingMutationCount": String(pending.count),
                     "protectedFields": protectedFields.sorted().joined(separator: ","),
                     "outcome": "insertedPending",
@@ -729,5 +733,19 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
             return String(describing: value)
         }
         return string
+    }
+
+    private func changedFields(for row: CollectionRow) -> String {
+        row.keys
+            .filter { Self.syncMetadataFieldNames.contains($0) == false }
+            .sorted()
+            .joined(separator: ",")
+    }
+
+    private static var syncMetadataFieldNames: Set<String> {
+        [
+            "collectionPendingMutationCount",
+            "collectionSyncState",
+        ]
     }
 }

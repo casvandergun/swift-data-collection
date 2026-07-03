@@ -192,40 +192,46 @@ public struct CollectionTraceEvent: Sendable, Hashable {
     }
 
     public func filtered(for level: CollectionDiagnosticsLevel) -> CollectionTraceEvent? {
+        let filteredMetadata: [String: String]
         switch level {
         case .off:
             return nil
-        case .debug, .trace:
-            return self
+        case .trace:
+            filteredMetadata = metadata
+        case .debug:
+            filteredMetadata = metadata.filter { Self.fullRowPayloadMetadataKeys.contains($0.key) == false }
         case .summary:
-            return CollectionTraceEvent(
-                timestamp: timestamp,
-                kind: kind,
-                collectionID: collectionID,
-                shapeID: shapeID,
-                modelName: modelName,
-                transactionID: transactionID,
-                key: key,
-                operation: operation,
-                sequenceNumber: sequenceNumber,
-                attemptCount: attemptCount,
-                awaitedTokens: awaitedTokens,
-                observedTokens: observedTokens,
-                resolvedTransactionIDs: resolvedTransactionIDs,
-                offset: offset,
-                pendingMutationCount: pendingMutationCount,
-                message: message,
-                errorDescription: errorDescription,
-                metadata: metadata.filter { Self.basicMetadataKeys.contains($0.key) }
-            )
+            filteredMetadata = metadata.filter { Self.summaryMetadataKeys.contains($0.key) }
         }
+
+        return CollectionTraceEvent(
+            timestamp: timestamp,
+            kind: kind,
+            collectionID: collectionID,
+            shapeID: shapeID,
+            modelName: modelName,
+            transactionID: transactionID,
+            key: key,
+            operation: operation,
+            sequenceNumber: sequenceNumber,
+            attemptCount: attemptCount,
+            awaitedTokens: awaitedTokens,
+            observedTokens: observedTokens,
+            resolvedTransactionIDs: resolvedTransactionIDs,
+            offset: offset,
+            pendingMutationCount: pendingMutationCount,
+            message: message,
+            errorDescription: errorDescription,
+            metadata: filteredMetadata
+        )
     }
 
-    private static let basicMetadataKeys: Set<String> = [
+    private static let summaryMetadataKeys: Set<String> = [
         "attemptCount",
         "awaitedTokens",
         "awaitedTXIDs",
         "awaitingTransactions",
+        "changedFields",
         "collectionID",
         "completion",
         "deletedCount",
@@ -260,6 +266,12 @@ public struct CollectionTraceEvent: Sendable, Hashable {
         "transactionIDs",
         "txids",
         "updatedCount",
+    ]
+
+    private static let fullRowPayloadMetadataKeys: Set<String> = [
+        "appliedRow",
+        "inboundRow",
+        "localRowBefore",
     ]
 
     var level: CollectionDebugLevel {
