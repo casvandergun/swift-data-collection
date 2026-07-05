@@ -136,7 +136,7 @@ public final class PendingCollectionMutation {
     }
 
     public func recordAttempt(at date: Date = Date()) {
-        attemptCount += 1
+        attemptCount = attemptCount == Int.max ? Int.max : attemptCount + 1
         lastAttemptAt = date
     }
 

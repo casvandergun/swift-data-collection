@@ -100,7 +100,7 @@ public final class PendingCollectionTransaction {
     }
 
     func recordAttempt(at date: Date = Date()) {
-        attemptCount += 1
+        attemptCount = attemptCount == Int.max ? Int.max : attemptCount + 1
         lastAttemptAt = date
         updatedAt = date
     }
@@ -155,13 +155,17 @@ public final class CollectionMetadata {
 }
 
 public struct CollectionRetryPolicy: PendingMutationRetryDelaying {
+    package static let maximumDelay: TimeInterval = 60
+
     public init() {}
 
     public func delay(forAttempt attemptCount: Int) -> TimeInterval {
         let clampedAttempt = max(1, attemptCount)
-        let base = min(pow(2.0, Double(clampedAttempt - 1)), 60.0)
+        let base = min(pow(2.0, Double(clampedAttempt - 1)), Self.maximumDelay)
         let jitter = Double(abs(clampedAttempt % 7)) * 0.137
-        return base + jitter
+        let delay = base + jitter
+        guard delay.isFinite else { return Self.maximumDelay }
+        return min(delay, Self.maximumDelay)
     }
 }
 
@@ -169,8 +173,9 @@ package typealias CollectionCommitSaver = @Sendable (ModelContext) throws -> Voi
 package typealias CollectionRetrySleeper = @Sendable (TimeInterval) async -> Void
 
 package func defaultCollectionRetrySleep(_ delay: TimeInterval) async {
-    guard delay > 0 else { return }
-    let nanoseconds = UInt64(max(0, delay) * 1_000_000_000)
+    guard delay.isFinite, delay > 0 else { return }
+    let boundedDelay = min(delay, CollectionRetryPolicy.maximumDelay)
+    let nanoseconds = UInt64(boundedDelay * 1_000_000_000)
     try? await Task.sleep(nanoseconds: nanoseconds)
 }
 
