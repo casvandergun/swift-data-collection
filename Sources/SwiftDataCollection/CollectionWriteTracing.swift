@@ -113,6 +113,9 @@ public enum CollectionTraceEventKind: String, Sendable, Codable, Hashable {
     case replayStarted
     case retryScheduled
     case retryFired
+    case connectivityChanged
+    case dispatchPausedOffline
+    case dispatchResumedOnline
     case awaitedTokensRegistered
     case adapterBatchObserved
     case pendingStateRefreshed
@@ -238,6 +241,7 @@ public struct CollectionTraceEvent: Sendable, Hashable {
         "delay",
         "error",
         "expectedRetryAt",
+        "connectivity",
         "finalPendingMutationCount",
         "finalSyncState",
         "from",
@@ -284,6 +288,7 @@ public struct CollectionTraceEvent: Sendable, Hashable {
             .info
         case .bootstrapStarted, .bootstrapCompleted, .lifecycleChanged,
              .replayScheduled, .replayStarted, .retryScheduled, .retryFired,
+             .connectivityChanged, .dispatchPausedOffline, .dispatchResumedOnline,
              .awaitedTokensRegistered, .adapterBatchObserved, .pendingStateRefreshed:
             .debug
         case .transactionStarted, .optimisticMutationRecorded, .mutationMerged,

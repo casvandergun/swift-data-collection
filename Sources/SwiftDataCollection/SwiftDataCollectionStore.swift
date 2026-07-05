@@ -57,10 +57,13 @@ public actor SwiftDataCollectionStore {
     private let retryPolicy: any PendingMutationRetryDelaying
     private let retrySleep: CollectionRetrySleeper
     private let foregroundObserverRegistrar: CollectionForegroundObserverRegistrar
+    private let connectivityMonitor: any CollectionConnectivityMonitoring
 
     private var bootstrapCompleted = false
     private var foregroundObserversInstalled = false
     private var foregroundObserverTokens: [CollectionForegroundObserverToken] = []
+    private var connectivityObserverTask: Task<Void, Never>?
+    private var connectivityState: CollectionConnectivityState = .online
     private var coordinatorsByCollectionID: [String: any CollectionRuntime] = [:]
     private var registrationsByModelName: [String: CollectionManagedModelRegistration] = [:]
 
@@ -76,7 +79,8 @@ public actor SwiftDataCollectionStore {
             commitSave: { try $0.save() },
             retryPolicy: CollectionRetryPolicy(),
             retrySleep: defaultCollectionRetrySleep,
-            foregroundObserverRegistrar: defaultForegroundObservers
+            foregroundObserverRegistrar: defaultForegroundObservers,
+            connectivityMonitor: CollectionNetworkConnectivityMonitor()
         )
     }
 
@@ -87,7 +91,8 @@ public actor SwiftDataCollectionStore {
         commitSave: @escaping CollectionCommitSaver = { try $0.save() },
         retryPolicy: any PendingMutationRetryDelaying = CollectionRetryPolicy(),
         retrySleep: @escaping CollectionRetrySleeper = defaultCollectionRetrySleep,
-        foregroundObserverRegistrar: @escaping CollectionForegroundObserverRegistrar = defaultForegroundObservers
+        foregroundObserverRegistrar: @escaping CollectionForegroundObserverRegistrar = defaultForegroundObservers,
+        connectivityMonitor: any CollectionConnectivityMonitoring = CollectionNetworkConnectivityMonitor()
     ) {
         self.modelContainer = modelContainer
         self.rowDecoder = rowDecoder
@@ -97,12 +102,14 @@ public actor SwiftDataCollectionStore {
         self.retryPolicy = retryPolicy
         self.retrySleep = retrySleep
         self.foregroundObserverRegistrar = foregroundObserverRegistrar
+        self.connectivityMonitor = connectivityMonitor
     }
 
     deinit {
         for token in foregroundObserverTokens {
             token.cancel()
         }
+        connectivityObserverTask?.cancel()
     }
 
     public func collection<
@@ -204,7 +211,31 @@ public actor SwiftDataCollectionStore {
     private func bootstrapIfNeeded() async {
         guard bootstrapCompleted == false else { return }
         bootstrapCompleted = true
+        connectivityMonitor.start()
+        connectivityState = connectivityMonitor.currentState()
+        installConnectivityObserverIfNeeded()
         installForegroundObserversIfNeeded()
+    }
+
+    private func installConnectivityObserverIfNeeded() {
+        guard connectivityObserverTask == nil else { return }
+        let updates = connectivityMonitor.updates()
+        connectivityObserverTask = Task {
+            for await state in updates {
+                await self.setConnectivityState(state)
+            }
+        }
+    }
+
+    private func setConnectivityState(_ state: CollectionConnectivityState) async {
+        guard connectivityState != state else { return }
+        connectivityState = state
+        for coordinator in coordinatorsByCollectionID.values {
+            await coordinator.setConnectivityState(state)
+        }
+        if state == .online {
+            await flush()
+        }
     }
 
     private func installForegroundObserversIfNeeded() {
@@ -263,7 +294,8 @@ public actor SwiftDataCollectionStore {
             tracer: tracer,
             commitSave: commitSave,
             retryPolicy: retryPolicy,
-            retrySleep: retrySleep
+            retrySleep: retrySleep,
+            connectivityState: connectivityState
         )
         await relay.bind(createdCoordinator)
         return createdCoordinator

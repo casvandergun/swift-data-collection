@@ -435,9 +435,9 @@ struct CollectionMutationReconciler {
             .filter { $0.modelName == modelName && $0.targetKey == targetKey }
             .filter { mutation in
                 switch mutation.status {
-                case .pending, .sending, .awaitingSync, .failed:
+                case .pending, .sending, .awaitingSync, .failed, .conflicted:
                     return true
-                case .resolved, .conflicted:
+                case .resolved:
                     return false
                 }
             }
@@ -459,7 +459,7 @@ struct CollectionMutationReconciler {
         existing.collectionPendingMutationCount = pending.count
         if pending.isEmpty {
             existing.collectionSyncState = .synced
-        } else if pending.contains(where: { $0.status == .failed }) {
+        } else if pending.contains(where: { $0.status == .failed || $0.status == .conflicted }) {
             existing.collectionSyncState = .syncError
         } else if pending.contains(where: { $0.operation == .delete }) {
             existing.collectionSyncState = .pendingDelete
@@ -825,6 +825,16 @@ public enum CollectionError: Error, Sendable {
     case missingStableIdentifier
     case missingAwaitedObservationTokens
     case invalidMutationSequence(CollectionMutationOperation, CollectionMutationOperation, String)
+}
+
+public struct CollectionNonRetriableError: Error, Sendable, CustomStringConvertible {
+    public let message: String
+
+    public init(_ message: String) {
+        self.message = message
+    }
+
+    public var description: String { message }
 }
 
 package struct CollectionManagedSourceDescriptor: Sendable, Hashable {

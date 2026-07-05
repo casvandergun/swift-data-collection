@@ -143,6 +143,16 @@ Core handlers stay sync-agnostic and complete by returning or throwing. Txids do
 
 When a txid is not available, the Electric adapter also exposes `ElectricCollectionSyncUtilities.awaitMatch(...)` for waiting on a matching Electric message after its batch has been applied to SwiftData.
 
+## Offline and Retry Behavior
+
+`SwiftDataCollectionStore` is network-aware by default on Apple platforms through `NWPathMonitor`. Local mutations are still accepted while offline: they are applied optimistically to SwiftData and persisted to the durable outbox, but outbound mutation handlers are not invoked until connectivity returns.
+
+When the monitor reports online again, failed transactions are made eligible immediately and the outbox drain resumes. Connectivity is only a scheduling signal; backend or validation failures from mutation handlers still determine whether a transaction retries or stops.
+
+Handlers are at-least-once: a transaction can be replayed after process restart, reconnect, or retry. Use stable transaction IDs or idempotency keys with your backend when a mutation endpoint is not naturally idempotent.
+
+Throw `CollectionNonRetriableError` from a handler for permanent application failures such as validation, authorization, or unrecoverable conflict errors. The transaction and mutations are marked conflicted instead of being retried, and the affected row remains in `syncError`.
+
 ## Model Requirements
 
 Collection-backed SwiftData models conform to `SwiftDataCollectionModel` and carry only minimal sync metadata:

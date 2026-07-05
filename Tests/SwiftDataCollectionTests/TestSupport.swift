@@ -23,6 +23,73 @@ typealias ElectricTracer = CollectionTracer
 typealias ElectricPendingMutationRetryDelaying = PendingMutationRetryDelaying
 typealias ElectricForegroundObserverRegistrar = CollectionForegroundObserverRegistrar
 typealias ElectricForegroundObserverToken = CollectionForegroundObserverToken
+typealias ElectricConnectivityState = CollectionConnectivityState
+typealias ElectricConnectivityMonitoring = CollectionConnectivityMonitoring
+
+final class TestConnectivityMonitor: ElectricConnectivityMonitoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var state: ElectricConnectivityState
+    private var continuations: [UUID: AsyncStream<ElectricConnectivityState>.Continuation] = [:]
+
+    init(initialState: ElectricConnectivityState = .online) {
+        self.state = initialState
+    }
+
+    func start() {}
+
+    func stop() {
+        lock.lock()
+        let activeContinuations = Array(continuations.values)
+        continuations.removeAll()
+        lock.unlock()
+
+        for continuation in activeContinuations {
+            continuation.finish()
+        }
+    }
+
+    func currentState() -> ElectricConnectivityState {
+        lock.lock()
+        defer { lock.unlock() }
+        return state
+    }
+
+    func updates() -> AsyncStream<ElectricConnectivityState> {
+        AsyncStream { continuation in
+            let id = UUID()
+            lock.lock()
+            let current = state
+            continuations[id] = continuation
+            lock.unlock()
+
+            continuation.yield(current)
+            continuation.onTermination = { [weak self] _ in
+                self?.removeContinuation(id)
+            }
+        }
+    }
+
+    func setState(_ newState: ElectricConnectivityState) {
+        lock.lock()
+        guard state != newState else {
+            lock.unlock()
+            return
+        }
+        state = newState
+        let activeContinuations = Array(continuations.values)
+        lock.unlock()
+
+        for continuation in activeContinuations {
+            continuation.yield(newState)
+        }
+    }
+
+    private func removeContinuation(_ id: UUID) {
+        lock.lock()
+        continuations.removeValue(forKey: id)
+        lock.unlock()
+    }
+}
 
 let testElectricCollectionShapeURL = URL(string: "http://localhost:3000/v1/shape")!
 

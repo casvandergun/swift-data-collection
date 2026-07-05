@@ -3,6 +3,7 @@ import SwiftData
 
 package protocol CollectionRuntime: Actor {
     func flush() async
+    func setConnectivityState(_ state: CollectionConnectivityState) async
     func reportAdapterApplied(
         sourceID: String,
         observedTokens: Set<String>,
@@ -37,6 +38,7 @@ actor CollectionCoordinator<
     private var awaitingRefreshTransactionIDs: Set<UUID> = []
     private var pendingDispatchIDs: [UUID] = []
     private var isDrainingDispatch = false
+    private var connectivityState: CollectionConnectivityState
     private var scheduledRetryAt: Date?
     private var scheduledRetryTask: Task<Void, Never>?
     private var debugEvents: [String] = []
@@ -52,7 +54,8 @@ actor CollectionCoordinator<
         tracer: CollectionTracer,
         commitSave: @escaping CollectionCommitSaver = { try $0.save() },
         retryPolicy: any PendingMutationRetryDelaying = CollectionRetryPolicy(),
-        retrySleep: @escaping CollectionRetrySleeper = defaultCollectionRetrySleep
+        retrySleep: @escaping CollectionRetrySleeper = defaultCollectionRetrySleep,
+        connectivityState: CollectionConnectivityState = .online
     ) {
         self.collectionID = collectionID
         self.configuration = configuration
@@ -67,6 +70,7 @@ actor CollectionCoordinator<
         self.commitSave = commitSave
         self.retryPolicy = retryPolicy
         self.retrySleep = retrySleep
+        self.connectivityState = connectivityState
     }
 
     deinit {
@@ -170,6 +174,36 @@ actor CollectionCoordinator<
     func flush() async {
         await bootstrapIfNeeded()
         await drainDispatchIfNeeded()
+    }
+
+    func setConnectivityState(_ state: CollectionConnectivityState) async {
+        guard connectivityState != state else { return }
+        let oldState = connectivityState
+        connectivityState = state
+        trace(
+            .connectivityChanged,
+            message: "collection connectivity changed",
+            metadata: [
+                "from": oldState.rawValue,
+                "to": state.rawValue,
+                "connectivity": state.rawValue,
+            ]
+        )
+
+        switch state {
+        case .offline:
+            cancelScheduledRetry()
+            await transitionLifecycle(to: .offline, reason: "connectivity changed offline", errorMessage: nil)
+        case .online:
+            makeFailedTransactionsEligibleForReconnectRetry()
+            await transitionLifecycle(to: .syncing, reason: "connectivity changed online", errorMessage: nil)
+            trace(
+                .dispatchResumedOnline,
+                message: "resuming dispatch after connectivity returned",
+                metadata: ["connectivity": state.rawValue]
+            )
+            await drainDispatchIfNeeded()
+        }
     }
 
     func reportAdapterApplied(
@@ -391,6 +425,16 @@ actor CollectionCoordinator<
 
     private func drainDispatchIfNeeded() async {
         guard isDrainingDispatch == false else { return }
+        guard connectivityState == .online else {
+            cancelScheduledRetry()
+            trace(
+                .dispatchPausedOffline,
+                message: "dispatch paused while offline",
+                metadata: ["connectivity": connectivityState.rawValue]
+            )
+            await transitionLifecycle(to: .offline, reason: "dispatch paused while offline", errorMessage: nil)
+            return
+        }
         isDrainingDispatch = true
         defer { isDrainingDispatch = false }
 
@@ -423,6 +467,7 @@ actor CollectionCoordinator<
     }
 
     private func processPendingTransaction(id: UUID) async {
+        guard connectivityState == .online else { return }
         let transactionRecord = queue.fetchPendingTransaction(id: id, collectionID: collectionID)
         guard let transactionRecord else { return }
         guard transactionRecord.status == .pending || transactionRecord.status == .failed else { return }
@@ -582,13 +627,27 @@ actor CollectionCoordinator<
                 await adapterRuntime.refresh()
             }
         } catch {
-            for representedTransaction in representedTransactions {
-                representedTransaction.markFailed(error, retryPolicy: retryPolicy)
+            if isNonRetriable(error) {
+                for representedTransaction in representedTransactions {
+                    representedTransaction.status = .conflicted
+                    representedTransaction.lastErrorMessage = String(describing: error)
+                    representedTransaction.nextRetryAt = nil
+                }
+                for mutation in stateMutations {
+                    mutation.status = .conflicted
+                    mutation.errorMessage = String(describing: error)
+                    mutation.nextRetryAt = nil
+                }
+                try? queue.saveContext()
+            } else {
+                for representedTransaction in representedTransactions {
+                    representedTransaction.markFailed(error, retryPolicy: retryPolicy)
+                }
+                for mutation in stateMutations {
+                    mutation.markFailed(error, retryPolicy: retryPolicy)
+                }
+                try? queue.saveContext()
             }
-            for mutation in stateMutations {
-                mutation.markFailed(error, retryPolicy: retryPolicy)
-            }
-            try? queue.saveContext()
 
             refreshPendingModelStates(keys: touchedKeys)
 
@@ -609,14 +668,19 @@ actor CollectionCoordinator<
                 sequenceNumber: transactionRecord.sequenceNumber,
                 attemptCount: transactionRecord.attemptCount,
                 pendingMutationCount: pendingMutations.count,
-                message: "dispatch failed",
-                error: error
+                message: isNonRetriable(error) ? "dispatch failed permanently" : "dispatch failed",
+                error: error,
+                metadata: ["nonRetriable": String(isNonRetriable(error))]
             )
             debug("failed dispatch for \(configuration.debugName) transaction \(id): \(error)")
         }
     }
 
     private func scheduleNextRetryIfNeeded(now: Date = Date()) {
+        guard connectivityState == .online else {
+            cancelScheduledRetry()
+            return
+        }
         let nextRetryAt = queue.nextRetryAt(collectionID: collectionID, now: now)
         guard let nextRetryAt else {
             cancelScheduledRetry()
@@ -659,6 +723,21 @@ actor CollectionCoordinator<
         scheduledRetryTask?.cancel()
         scheduledRetryTask = nil
         scheduledRetryAt = nil
+    }
+
+    private func makeFailedTransactionsEligibleForReconnectRetry(now: Date = Date()) {
+        let failedTransactions = queue.fetchAllPendingTransactions(collectionID: collectionID)
+            .filter { $0.status == .failed }
+        guard failedTransactions.isEmpty == false else { return }
+
+        for transaction in failedTransactions {
+            transaction.nextRetryAt = now
+            transaction.updatedAt = now
+            for mutation in queue.fetchPendingMutations(transactionID: transaction.id) where mutation.status == .failed {
+                mutation.nextRetryAt = now
+            }
+        }
+        try? queue.saveContext()
     }
 
     private func commitPreparedTransaction(
@@ -1095,6 +1174,10 @@ actor CollectionCoordinator<
 
     private func isoString(_ date: Date) -> String {
         ISO8601DateFormatter().string(from: date)
+    }
+
+    private func isNonRetriable(_ error: Error) -> Bool {
+        error is CollectionNonRetriableError
     }
 
     private func trace(
