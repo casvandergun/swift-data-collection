@@ -63,6 +63,7 @@ Why:
 
 - Expose first-class diagnostics values such as last sync age, current replay state, and fallback mode.
 - Consider a programmatic debug event stream in addition to log sinks.
+- Expose public outbox inspection values such as pending/running counts and queued transaction summaries.
 
 Why:
 
@@ -104,6 +105,21 @@ Why:
 
 - The current direction is good, but the collection path still carries many responsibilities in one runtime.
 
+### 8. Cross-Collection Scheduling
+
+- Consider a shared scheduler owned by `SwiftDataCollectionStore` for cross-collection dispatch order.
+- Keep SwiftData as the only row/query store and keep per-collection coordinators responsible for adapter execution, txid registration, reconciliation, and row-state refresh.
+- The scheduler would coordinate *when* a collection transaction may dispatch; it should not become a second row cache or adapter runtime.
+- This is especially relevant for parent/child writes across collections, such as creating a parent row and then a child row that references it before the parent is authoritative.
+
+Why:
+
+- TanStack's offline transaction package uses a global executor because the browser package owns one durable outbox, one leader-election role, one online detector, named mutation functions, and optimistic state restoration across TanStack collections.
+- SwiftDataCollection currently has per-collection coordinators because Electric completion, shape subscriptions, same-key safety, and row reconciliation are naturally collection/source scoped.
+- Per-collection scheduling is simpler and avoids a coordinator god object, but it does not provide global FIFO across independent collections.
+- A store-level scheduler is tempting as a middle ground: preserve collection-scoped state engines while adding explicit cross-collection ordering or dependency blocking.
+- Do not jump directly to global serialization unless the package needs true multi-collection ordering; explicit dependencies such as `dependsOnTransactionIDs` or `dependsOnKeys` may solve parent/child constraints with less unnecessary blocking.
+
 ## Design Guidance
 
 The TypeScript and TanStack references remain behavioral references, not implementation templates.
@@ -113,6 +129,8 @@ The TypeScript and TanStack references remain behavioral references, not impleme
 - transaction-first durability discipline
 - replay on restart
 - autonomous retry scheduling
+- network-aware pause/resume with reconnect-triggered retry reset
+- explicit non-retriable failure signaling
 - evidence-based completion using observed sync state
 - collection-scoped metadata and reset behavior
 - adapter-owned protocol translation and confirmation semantics
@@ -124,6 +142,18 @@ The TypeScript and TanStack references remain behavioral references, not impleme
 - a second optimistic row store layered over SwiftData
 - browser-specific storage and coordination assumptions
 - TypeScript-style utility bags when typed Swift facades are clearer
+
+### Current TanStack Offline-Transaction Diffs
+
+The Swift implementation should match TanStack's behavior where it maps cleanly to SwiftData, but the following differences are intentional or still open:
+
+- **Authoritative completion:** TanStack removes an outbox transaction when the mutation function succeeds. Electric-backed collections may remain `.awaitingSync` until observed txids or refresh completion prove that SwiftData has seen the authoritative write.
+- **Permanent failures:** TanStack's `NonRetriableError` removes the transaction from the outbox and rejects waiters. SwiftDataCollection marks transaction and mutations `.conflicted` and leaves affected rows in `syncError` so the app can surface or repair local state.
+- **Scheduling scope:** TanStack schedules through one global executor. SwiftDataCollection schedules per collection today; a future store-level scheduler may add cross-collection ordering without taking over row storage or adapter responsibilities.
+- **Storage and leadership:** TanStack needs IndexedDB/localStorage fallback and Web Locks/BroadcastChannel leader election. SwiftDataCollection uses SwiftData durability and does not have browser tab leadership.
+- **Outbox administration:** TanStack exposes `peekOutbox`, `removeFromOutbox`, `clearOutbox`, pending count, and running count. SwiftDataCollection has persisted outbox models and traces, but no polished public admin API yet.
+- **Retry filtering:** TanStack has `beforeRetry` to filter loaded transactions before replay. SwiftDataCollection does not yet expose an equivalent hook.
+- **Idempotency ergonomics:** TanStack passes an explicit `idempotencyKey` into mutation functions. SwiftDataCollection handlers can use `context.transaction.id`, but a named idempotency-key convenience is still open.
 
 ## Changelog
 
@@ -147,6 +177,9 @@ The TypeScript and TanStack references remain behavioral references, not impleme
 - Preserved transaction-first mutation merge behavior for same-key mutations within a transaction.
 - Deferred physical delete until authoritative sync completion so failed deletes remain visible and recoverable.
 - Added autonomous replay and retry scheduling with startup, refresh, shape-apply, and foreground wake-up triggers.
+- Added network-aware offline pause/resume via injectable connectivity monitoring and an `NWPathMonitor` default.
+- Added immediate retry eligibility on reconnect for failed transactions.
+- Added `CollectionNonRetriableError` for permanent handler failures that should mark local state conflicted instead of retrying.
 - Rebuild pending local row-visible state from the durable outbox during collection bootstrap.
 - Hard-enforced the one managed shape or collection per model type rule within `SwiftDataCollectionStore`.
 - Preserved tests for:
@@ -166,3 +199,6 @@ The TypeScript and TanStack references remain behavioral references, not impleme
 - The automated confidence bar is restart-grade persistence coverage plus high-fidelity protocol-contract tests, not a full live backend E2E lane.
 - Dynamic headers and parameters are not yet supported.
 - Postgres coercion coverage is still incomplete.
+- Dispatch scheduling is per collection, not globally FIFO across all collections.
+- Public outbox administration APIs are not yet exposed.
+- Mutation handlers do not yet receive a named idempotency-key field; use the transaction ID when idempotency is required.
