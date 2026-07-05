@@ -9,11 +9,13 @@ The package is intentionally split into two deliverables:
 2. `ElectricSwiftDataCollection`
    The first adapter: Electric shape subscriptions, Electric row conversion, SwiftData materialization, and txid-backed authoritative completion. It depends on `ElectricSwift` v0.1.0 from GitHub.
 
-## Release Position
+## Current Status
 
-The collection path is restart-grade: transaction durability is transaction-first on disk, optimistic deletes are recoverable, retry/replay is autonomous, one managed shape or collection per model type is enforced, and the release-grade evidence bar is in place.
+The collection path is restart-grade and offline-aware: transaction durability is transaction-first on disk, optimistic deletes are recoverable, retry/replay is autonomous, network loss pauses outbound dispatch, reconnect resumes eligible work, one managed shape or collection per model type is enforced, and the release-grade evidence bar is in place.
 
 The Electric adapter now contains the old read-side SwiftData sync pieces, so there is no separate `ElectricSwiftData` module in this package.
+
+The remaining `v0.1` work is release packaging and API polish, not core collection correctness.
 
 ## v0.1 Scope
 
@@ -28,17 +30,25 @@ Ship a trustworthy SwiftData-first collection runtime with an Electric adapter i
 - exposing Electric protocol types from `SwiftDataCollection`
 - broad TypeScript API parity where a Swift-native API is clearer
 
-## P0 Before v0.1
+## v0.1 Release Readiness
 
-The original collection release blockers are now addressed:
+The original collection release blockers are addressed:
 
 - restart-grade recovery coverage exists for durable outbox replay, failed delete visibility, retry after reopen, FIFO ordering after restart, and atomic rollback persistence guarantees
 - high-fidelity protocol-contract tests prove authoritative txid-backed completion against the Electric message surface the Swift runtime consumes
 - `SwiftDataCollection` is backend-neutral and no longer imports `ElectricSwift`
 - `ElectricSwiftDataCollection` is the Electric adapter target under `Sources/Adapters/ElectricSwiftDataCollection`
 - `Package.resolved` pins `electric-swift` to `0.1.0`
+- retry delays are bounded and attempt counts saturate safely
+- diagnostics levels and payload filtering are implemented
+- offline connectivity gating is implemented with an injectable monitor and `NWPathMonitor` default
 
-The remaining `v0.1` work is release packaging and polish, not core collection correctness.
+Before tagging `v0.1`, do a final packaging pass:
+
+- review public API names and access levels for accidental `package`/`public` mismatches
+- run the full Swift test suite with the Xcode toolchain
+- update README examples if any public API names change
+- tag and publish once the package manifest and dependency pin are final
 
 ## P1 After v0.1
 
@@ -61,9 +71,10 @@ Why:
 
 ### 3. Diagnostics Surface
 
-- Expose first-class diagnostics values such as last sync age, current replay state, and fallback mode.
-- Consider a programmatic debug event stream in addition to log sinks.
+- Diagnostics levels, payload filtering, app logger, handler diagnostics, and OSLog tracing are implemented.
+- Still consider a programmatic debug event stream in addition to log sinks.
 - Expose public outbox inspection values such as pending/running counts and queued transaction summaries.
+- Expose first-class status snapshots such as last sync age, current replay state, current connectivity state, and pending outbox counts.
 
 Why:
 
@@ -82,6 +93,7 @@ Why:
 
 - Prune or compact resolved transactions and mutations.
 - Define retention rules for debugging versus storage growth.
+- Same-key successor update compaction during dispatch is implemented; this item is about durable historical cleanup, not outbound mutation merging.
 
 Why:
 
@@ -100,10 +112,11 @@ Why:
 ### 7. Internal State-Machine Refinement
 
 - Continue splitting collection runtime behavior into focused components instead of growing the coordinator.
+- The latest direction is positive: retry policy, tracing, row application, synchronization, connectivity, and adapter runtime seams are separate enough to test directly.
 
 Why:
 
-- The current direction is good, but the collection path still carries many responsibilities in one runtime.
+- The collection coordinator still owns lifecycle, dispatch, retry, txid registration, pending-state refresh, and failure handling. Future features should move more policy into focused collaborators rather than adding more branches to the coordinator.
 
 ### 8. Cross-Collection Scheduling
 
@@ -157,6 +170,21 @@ The Swift implementation should match TanStack's behavior where it maps cleanly 
 
 ## Changelog
 
+### Latest Status
+
+- Core offline transaction behavior is now close to TanStack offline-transactions behavior where it maps cleanly to SwiftData:
+  - durable transaction-first outbox
+  - optimistic writes into SwiftData
+  - restart replay
+  - retryable failure backoff
+  - network-aware pause/resume
+  - reconnect-triggered retry reset
+  - explicit non-retriable failure signaling
+- The main intentional differences are still SwiftData/Electric-specific:
+  - Electric completion can wait for observed txids or refresh confirmation instead of handler success alone.
+  - Permanent failures remain visible as conflicted local state rather than being removed from the outbox immediately.
+  - Scheduling remains per collection until a store-level scheduler is designed.
+
 ### Implemented
 
 - Introduced `SwiftDataCollection` as the backend-neutral core product.
@@ -175,13 +203,16 @@ The Swift implementation should match TanStack's behavior where it maps cleanly 
 - Added Electric adapter utilities for `awaitTxID` and `awaitMatch`.
 - Added neutral row patching with protected pending fields.
 - Preserved transaction-first mutation merge behavior for same-key mutations within a transaction.
+- Added same-key predecessor blocking and pending successor update compaction during dispatch.
 - Deferred physical delete until authoritative sync completion so failed deletes remain visible and recoverable.
 - Added autonomous replay and retry scheduling with startup, refresh, shape-apply, and foreground wake-up triggers.
+- Clamped retry delays and prevented attempt count overflow.
 - Added network-aware offline pause/resume via injectable connectivity monitoring and an `NWPathMonitor` default.
 - Added immediate retry eligibility on reconnect for failed transactions.
 - Added `CollectionNonRetriableError` for permanent handler failures that should mark local state conflicted instead of retrying.
 - Rebuild pending local row-visible state from the durable outbox during collection bootstrap.
 - Hard-enforced the one managed shape or collection per model type rule within `SwiftDataCollectionStore`.
+- Split diagnostics into filtered levels, app logger, OSLog tracer, and handler-based capture.
 - Preserved tests for:
   - sparse SwiftData updates
   - patch-aware reconciliation
@@ -192,6 +223,10 @@ The Swift implementation should match TanStack's behavior where it maps cleanly 
   - autonomous retry after failure
   - managed shape/collection conflict enforcement
   - file-backed restart and recovery behavior
+  - retry saturation and delay bounds
+  - diagnostics payload filtering
+  - same-key blocking and compaction
+  - offline queueing and reconnect retry behavior
 
 ### Current Known Constraints
 
@@ -202,3 +237,5 @@ The Swift implementation should match TanStack's behavior where it maps cleanly 
 - Dispatch scheduling is per collection, not globally FIFO across all collections.
 - Public outbox administration APIs are not yet exposed.
 - Mutation handlers do not yet receive a named idempotency-key field; use the transaction ID when idempotency is required.
+- There is no `beforeRetry`-style hook for apps to filter or drop loaded transactions before replay.
+- Resolved/conflicted outbox retention is not yet bounded by a cleanup policy.
