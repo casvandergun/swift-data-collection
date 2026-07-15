@@ -13,7 +13,7 @@ The package is intentionally split into two deliverables:
 
 Latest released version: `v0.1.2`.
 
-`main` contains unreleased `v0.2.0`-targeted hardening work: retry bounds, network-aware offline pause/resume, reconnect retry reset, non-retriable error handling, and updated offline transaction parity documentation.
+`main` contains unreleased `v0.2.0`-targeted hardening work: durable staged inserts, serialized managed writes, retry bounds, network-aware offline pause/resume, reconnect retry reset, non-retriable error handling, and updated offline transaction parity documentation.
 
 The collection path is restart-grade and offline-aware. Transaction durability is transaction-first on disk, optimistic deletes are recoverable, retry/replay is autonomous, network loss pauses outbound dispatch, reconnect resumes eligible work, one managed shape or collection per model type is enforced, and the release-grade evidence bar is in place.
 
@@ -33,6 +33,9 @@ Ship the offline transaction hardening already on `main` and decide the next sch
 - Immediate retry eligibility when connectivity returns.
 - `CollectionNonRetriableError` for permanent handler failures that should leave local state conflicted instead of retrying.
 - Documentation of TanStack offline-transaction parity and intentional SwiftData/Electric differences.
+- Durable `.stagedCreate` rows with stage, local update, publish, and discard operations.
+- Per-collection serialization of managed coordinator and adapter SwiftData writes.
+- Adapter-driven resolution of staged rows, with staged work preserved during deletes and resets.
 
 ### Planned Decisions
 
@@ -80,6 +83,7 @@ Do not use `v0.1.3` for the current offline connectivity work unless the release
 - Support deferred or async resolution of request headers and extra parameters.
 - Expand schema-driven coercion beyond the currently implemented common scalars, arrays, and JSON shapes.
 - Thread `ElectricCollectionSyncUtilities` through richer handler contexts if the public API needs it, while keeping Electric-specific utilities out of `SwiftDataCollection`.
+- Define revision or ordering-evidence semantics before considering a general authoritative direct-write API.
 
 ## Backlog
 
@@ -139,3 +143,5 @@ The Swift implementation should match TanStack's behavior where it maps cleanly 
 - Mutation handlers do not yet receive a named idempotency-key field; use the transaction ID when idempotency is required.
 - There is no `beforeRetry`-style hook for apps to filter or drop loaded transactions before replay.
 - Resolved/conflicted outbox retention is not yet bounded by a cleanup policy.
+- General authoritative direct writes are not exposed; staged rows become synchronized only through their managed adapter.
+- Concurrent standalone Electric row application and managed collection writes over the same model type are unsupported.

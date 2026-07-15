@@ -14,6 +14,8 @@ actor FetchCollectionAdapterRuntime<
     private let identifier: CollectionModelIdentifier<Model, ID>
     private let rowDecoder: CollectionRowDecoder
     private let onApply: CollectionApplyHandler?
+    private let writeGate: CollectionWriteGate
+    private let tracer: CollectionTracer
     private let reportRefreshCompleted: @Sendable (Date?) async -> Void
     private let reportError: @Sendable (Error) async -> Void
 
@@ -33,6 +35,8 @@ actor FetchCollectionAdapterRuntime<
         self.identifier = context.identifier
         self.rowDecoder = context.rowDecoder
         self.onApply = context.onApply
+        self.writeGate = context.writeGate
+        self.tracer = context.tracer
         self.reportRefreshCompleted = context.reportRefreshCompleted
         self.reportError = context.reportError
     }
@@ -46,22 +50,60 @@ actor FetchCollectionAdapterRuntime<
     func refresh() async {
         do {
             let rows = try await configuration.fetch(context)
-            let modelContext = ModelContext(modelContainer)
-            let applier = FetchCollectionSnapshotApplier(
-                identifier: identifier,
-                rowDecoder: rowDecoder,
-                modelName: configuration.modelName,
-                missingRowPolicy: configuration.missingRowPolicy
-            )
-            let result = try applier.apply(rows, in: modelContext)
-            let summary = CollectionBatchApplySummary(
-                collectionIdentifier: collectionID,
-                sourceIdentifier: sourceID,
-                insertedCount: result.insertedCount,
-                updatedCount: result.updatedCount,
-                deletedCount: result.deletedCount
-            )
-            try onApply?(modelContext, summary)
+            try writeGate.withCriticalSection {
+                let modelContext = ModelContext(modelContainer)
+                let applier = FetchCollectionSnapshotApplier(
+                    identifier: identifier,
+                    rowDecoder: rowDecoder,
+                    modelName: configuration.modelName,
+                    missingRowPolicy: configuration.missingRowPolicy
+                )
+                let result = try applier.apply(rows, in: modelContext)
+                let summary = CollectionBatchApplySummary(
+                    collectionIdentifier: collectionID,
+                    sourceIdentifier: sourceID,
+                    insertedCount: result.insertedCount,
+                    updatedCount: result.updatedCount,
+                    deletedCount: result.deletedCount
+                )
+                for key in result.resolvedStagedKeys {
+                    tracer.record(
+                        CollectionTraceEvent(
+                            kind: .stagedInsertResolved,
+                            collectionID: collectionID,
+                            shapeID: sourceID,
+                            modelName: configuration.modelName,
+                            key: key,
+                            message: "fetch adapter resolved staged insert",
+                            metadata: [
+                                "adapterOperation": "snapshotUpsert",
+                                "outcome": "resolved",
+                                "previousSyncState": String(describing: CollectionSyncState.stagedCreate),
+                                "resultingSyncState": String(describing: CollectionSyncState.synced),
+                            ]
+                        )
+                    )
+                }
+                for key in result.preservedStagedKeys {
+                    tracer.record(
+                        CollectionTraceEvent(
+                            kind: .stagedDeletePreserved,
+                            collectionID: collectionID,
+                            shapeID: sourceID,
+                            modelName: configuration.modelName,
+                            key: key,
+                            message: "fetch adapter preserved missing staged insert",
+                            metadata: [
+                                "adapterOperation": "snapshotMissing",
+                                "outcome": "preservedStaged",
+                                "previousSyncState": String(describing: CollectionSyncState.stagedCreate),
+                                "resultingSyncState": String(describing: CollectionSyncState.stagedCreate),
+                            ]
+                        )
+                    )
+                }
+                try onApply?(modelContext, summary)
+            }
             await reportRefreshCompleted(Date())
         } catch {
             await reportError(error)
@@ -82,6 +124,8 @@ struct FetchCollectionSnapshotApplier<
         let insertedCount: Int
         let updatedCount: Int
         let deletedCount: Int
+        let resolvedStagedKeys: [String]
+        let preservedStagedKeys: [String]
     }
 
     func apply(
@@ -94,6 +138,8 @@ struct FetchCollectionSnapshotApplier<
         var insertedCount = 0
         var updatedCount = 0
         var deletedCount = 0
+        var resolvedStagedKeys: [String] = []
+        var preservedStagedKeys: [String] = []
 
         for row in rows {
             let decoded = try Model(collectionRow: row, decoder: rowDecoder)
@@ -104,6 +150,18 @@ struct FetchCollectionSnapshotApplier<
 
             returnedKeys.insert(key)
             if let existing = try fetchModel(key: key, in: context) {
+                if try CollectionStagedReconciler.applyUpsert(
+                    key: key,
+                    row: row,
+                    mode: .replacement,
+                    identifier: identifier,
+                    rowDecoder: rowDecoder,
+                    in: context
+                ) == .resolved {
+                    updatedCount += 1
+                    resolvedStagedKeys.append(key)
+                    continue
+                }
                 if try applyFetchedRow(
                     row,
                     to: existing,
@@ -129,6 +187,15 @@ struct FetchCollectionSnapshotApplier<
                 let key = identifier.key(for: model)
                 guard returnedKeys.contains(key) == false else { continue }
                 let pending = unresolvedMutations[key] ?? []
+                if pending.isEmpty,
+                   try CollectionStagedReconciler.preserveDelete(
+                       key: key,
+                       identifier: identifier,
+                       in: context
+                   ) == .preservedDelete {
+                    preservedStagedKeys.append(key)
+                    continue
+                }
                 if pending.isEmpty {
                     context.delete(model)
                     deletedCount += 1
@@ -140,6 +207,14 @@ struct FetchCollectionSnapshotApplier<
             for model in existingModels {
                 let key = identifier.key(for: model)
                 guard returnedKeys.contains(key) == false else { continue }
+                if try CollectionStagedReconciler.preserveDelete(
+                    key: key,
+                    identifier: identifier,
+                    in: context
+                ) == .preservedDelete {
+                    preservedStagedKeys.append(key)
+                    continue
+                }
                 refreshSyncState(
                     for: model,
                     pending: unresolvedMutations[key] ?? []
@@ -151,7 +226,9 @@ struct FetchCollectionSnapshotApplier<
         return ApplyResult(
             insertedCount: insertedCount,
             updatedCount: updatedCount,
-            deletedCount: deletedCount
+            deletedCount: deletedCount,
+            resolvedStagedKeys: resolvedStagedKeys,
+            preservedStagedKeys: preservedStagedKeys
         )
     }
 

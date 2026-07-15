@@ -4,6 +4,10 @@ All notable package changes are tracked here by release.
 
 ## Unreleased - target v0.2.0
 
+- Added durable `.stagedCreate` rows with collection APIs to stage, locally update, publish, and discard existing SwiftData models without prematurely creating outbound mutations.
+- Added per-managed-collection write serialization across coordinator commits, Electric batches, and Fetch snapshot application.
+- Added backend-neutral staged reconciliation so adapter upserts resolve staged rows while adapter deletes and resets preserve staged work.
+- Kept general authoritative direct writes deferred until cross-source ordering semantics are defined.
 - Clamped retry delays and saturated transaction/mutation attempt counters to avoid overflow.
 - Added network-aware offline pause/resume through injectable connectivity monitoring and an `NWPathMonitor` default.
 - Pause outbound outbox dispatch while offline, keep optimistic SwiftData writes durable, and resume eligible work on reconnect.

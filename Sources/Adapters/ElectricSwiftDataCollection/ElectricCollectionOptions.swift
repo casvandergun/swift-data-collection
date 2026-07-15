@@ -212,7 +212,8 @@ actor ElectricCollectionAdapterRuntime<
             modelContainer: context.modelContainer,
             rowDecoder: context.rowDecoder,
             debugLogger: context.debugLogger.electricDebugLogger,
-            observer: nil
+            observer: nil,
+            writeGate: context.writeGate
         )
         let synchronizer = ElectricCollectionSynchronizer<Model, ID>(
             identifier: context.identifier,

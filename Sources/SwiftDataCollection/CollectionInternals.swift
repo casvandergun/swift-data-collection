@@ -1,6 +1,20 @@
 import Foundation
 import SwiftData
 
+package final class CollectionWriteGate: @unchecked Sendable {
+    private let lock = NSLock()
+
+    package init() {}
+
+    package func withCriticalSection<Result>(
+        _ body: () throws -> Result
+    ) rethrows -> Result {
+        lock.lock()
+        defer { lock.unlock() }
+        return try body()
+    }
+}
+
 public enum CollectionLifecycleState: Sendable, Hashable, Codable {
     case idle
     case bootstrapping
@@ -458,7 +472,9 @@ struct CollectionMutationReconciler {
         let pending = unresolvedMutations(modelName: modelName, targetKey: key, in: context)
         existing.collectionPendingMutationCount = pending.count
         if pending.isEmpty {
-            existing.collectionSyncState = .synced
+            if existing.collectionSyncState != .stagedCreate {
+                existing.collectionSyncState = .synced
+            }
         } else if pending.contains(where: { $0.status == .failed || $0.status == .conflicted }) {
             existing.collectionSyncState = .syncError
         } else if pending.contains(where: { $0.operation == .delete }) {
@@ -551,19 +567,20 @@ struct PreparedCollectionTransaction {
 
 enum OptimisticModelChange {
     case create(key: String, row: CollectionRow)
+    case promoteExistingCreate(key: String, row: CollectionRow)
     case update(key: String, row: CollectionRow)
     case delete(key: String)
 
     var key: String {
         switch self {
-        case .create(let key, _), .update(let key, _), .delete(let key):
+        case .create(let key, _), .promoteExistingCreate(let key, _), .update(let key, _), .delete(let key):
             return key
         }
     }
 
     var operation: CollectionMutationOperation {
         switch self {
-        case .create:
+        case .create, .promoteExistingCreate:
             return .create
         case .update:
             return .update
@@ -624,6 +641,46 @@ public final class CollectionTransactionBuilder<Model: SwiftDataCollectionModel,
             metadata: metadata
         )
         try record(mutation)
+    }
+
+    func insertExisting(
+        _ key: ID,
+        metadata: [String: CollectionValue] = [:]
+    ) throws {
+        let serializedKey = identifier.serialize(key)
+        guard serializedKey.isEmpty == false else {
+            throw CollectionError.missingStableIdentifier
+        }
+        let pending = CollectionMutationReconciler.unresolvedMutations(
+            modelName: modelName,
+            targetKey: serializedKey,
+            in: context
+        )
+        guard pending.isEmpty else {
+            throw CollectionError.stagedOperationHasPendingMutations(
+                key: serializedKey,
+                count: pending.count
+            )
+        }
+        guard let model = try context.fetch(identifier.fetchDescriptor(for: key)).first else {
+            throw CollectionError.modelNotFound(serializedKey)
+        }
+        guard model.collectionSyncState == .stagedCreate else {
+            throw CollectionError.invalidStagedTransition(
+                key: serializedKey,
+                state: model.collectionSyncState
+            )
+        }
+        let row = try model.collectionRow()
+        try record(
+            CollectionMutation(
+                operation: .create,
+                key: serializedKey,
+                modified: row,
+                changes: row,
+                metadata: metadata
+            )
+        )
     }
 
     public func update(
@@ -708,12 +765,19 @@ public final class CollectionTransactionBuilder<Model: SwiftDataCollectionModel,
         try record(mutation)
     }
 
-    func preparedTransaction() -> PreparedCollectionTransaction {
+    func preparedTransaction(promotingExistingCreate: Bool = false) -> PreparedCollectionTransaction {
         let mutations: [CollectionMutation] = mutationOrder.compactMap { key in
             guard let mutation = mutationsByKey[key] else { return nil }
             return mutation
         }
-        let optimisticChanges = mutations.compactMap(Self.optimisticChange(from:))
+        let optimisticChanges: [OptimisticModelChange] = mutations.compactMap { mutation in
+            if promotingExistingCreate,
+               mutation.operation == .create,
+               let row = mutation.modified {
+                return .promoteExistingCreate(key: mutation.key, row: row)
+            }
+            return Self.optimisticChange(from: mutation)
+        }
         return PreparedCollectionTransaction(
             collectionID: collectionID,
             shapeID: shapeID,
@@ -825,6 +889,9 @@ public enum CollectionError: Error, Sendable {
     case missingStableIdentifier
     case missingAwaitedObservationTokens
     case invalidMutationSequence(CollectionMutationOperation, CollectionMutationOperation, String)
+    case invalidStagedTransition(key: String, state: CollectionSyncState)
+    case stagedOperationHasPendingMutations(key: String, count: Int)
+    case stableIdentifierChanged(expected: String, actual: String)
 }
 
 public struct CollectionNonRetriableError: Error, Sendable, CustomStringConvertible {

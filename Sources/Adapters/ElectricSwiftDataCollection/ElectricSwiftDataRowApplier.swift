@@ -62,14 +62,27 @@ public struct ElectricSwiftDataRowApplier<Model: SwiftDataCollectionModel, ID: H
         var deletedCount = 0
 
         if batch.messages.contains(where: { $0.headers.control == .mustRefetch }) {
-            let refetchDeletedCount = try deleteRefetchableModels(in: context)
-            deletedCount += refetchDeletedCount
+            let refetch = try deleteRefetchableModels(in: context)
+            deletedCount += refetch.deletedCount
+            for key in refetch.preservedStagedKeys {
+                logApply(
+                    shapeID: shapeID,
+                    message: "preserved staged model during must-refetch",
+                    metadata: [
+                        "modelName": modelName,
+                        "key": key,
+                        "operation": "mustRefetch",
+                        "offset": batch.state.offset,
+                        "outcome": "preservedStaged",
+                    ]
+                )
+            }
             logApply(
                 shapeID: shapeID,
                 message: "cleared refetchable models",
                 metadata: [
                     "modelName": modelName,
-                    "deletedCount": String(refetchDeletedCount),
+                    "deletedCount": String(refetch.deletedCount),
                     "offset": batch.state.offset,
                 ]
             )
@@ -120,7 +133,12 @@ public struct ElectricSwiftDataRowApplier<Model: SwiftDataCollectionModel, ID: H
                     logMessageSkip(message, shapeID: shapeID, offset: batch.state.offset, reason: "missing key")
                     continue
                 }
-                let deleted = try applyDelete(key: key, in: context)
+                let deleted = try applyDelete(
+                    key: key,
+                    shapeID: shapeID,
+                    offset: batch.state.offset,
+                    in: context
+                )
                 if deleted {
                     deletedCount += 1
                 }
@@ -193,6 +211,16 @@ public struct ElectricSwiftDataRowApplier<Model: SwiftDataCollectionModel, ID: H
             schema: schema,
             collectionSchema: collectionSchema
         )
+        if try CollectionStagedReconciler.applyUpsert(
+            key: key,
+            row: collectionRow,
+            mode: operation == .insert ? .replacement : .patch,
+            identifier: identifier,
+            rowDecoder: rowDecoder,
+            in: context
+        ) == .resolved {
+            return operation == .update ? .mergedPatch : .updated
+        }
         if let existing = try fetchModel(key: key, in: context) {
             let appliedRow = if operation == .update {
                 CollectionRowPatcher.applying(patch: collectionRow, to: try existing.collectionRow())
@@ -214,8 +242,28 @@ public struct ElectricSwiftDataRowApplier<Model: SwiftDataCollectionModel, ID: H
 
     private func applyDelete(
         key: String,
+        shapeID: String,
+        offset: String,
         in context: ModelContext
     ) throws -> Bool {
+        if try CollectionStagedReconciler.preserveDelete(
+            key: key,
+            identifier: identifier,
+            in: context
+        ) == .preservedDelete {
+            logApply(
+                shapeID: shapeID,
+                message: "preserved staged model during delete",
+                metadata: [
+                    "modelName": modelName,
+                    "key": key,
+                    "operation": "delete",
+                    "offset": offset,
+                    "outcome": "preservedStaged",
+                ]
+            )
+            return false
+        }
         if let existing = try fetchModel(key: key, in: context) {
             context.delete(existing)
             return true
@@ -234,14 +282,21 @@ public struct ElectricSwiftDataRowApplier<Model: SwiftDataCollectionModel, ID: H
         return try context.fetch(descriptor).first
     }
 
-    private func deleteRefetchableModels(in context: ModelContext) throws -> Int {
+    private func deleteRefetchableModels(
+        in context: ModelContext
+    ) throws -> (deletedCount: Int, preservedStagedKeys: [String]) {
         let models = try context.fetch(FetchDescriptor<Model>())
         var deletedCount = 0
+        var preservedStagedKeys: [String] = []
         for model in models where model.collectionPendingMutationCount == 0 {
+            if model.collectionSyncState == .stagedCreate {
+                preservedStagedKeys.append(identifier.key(for: model))
+                continue
+            }
             context.delete(model)
             deletedCount += 1
         }
-        return deletedCount
+        return (deletedCount, preservedStagedKeys)
     }
 
     private var modelName: String {

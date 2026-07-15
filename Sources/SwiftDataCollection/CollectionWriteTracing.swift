@@ -132,6 +132,13 @@ public enum CollectionTraceEventKind: String, Sendable, Codable, Hashable {
     case shapeBatchApplied
     case transactionCompleted
     case transactionFailed
+    case stagedInsertCreated
+    case stagedInsertNoOp
+    case stagedInsertUpdated
+    case stagedInsertPublished
+    case stagedInsertDiscarded
+    case stagedInsertResolved
+    case stagedDeletePreserved
 }
 
 public struct CollectionTraceEvent: Sendable, Hashable {
@@ -284,6 +291,9 @@ public struct CollectionTraceEvent: Sendable, Hashable {
             .error
         case .transactionCompleted, .shapeBatchApplied:
             .info
+        case .stagedInsertCreated, .stagedInsertUpdated, .stagedInsertPublished,
+             .stagedInsertDiscarded, .stagedInsertResolved:
+            .info
         case .handlerReturned, .awaitingSync:
             .info
         case .bootstrapStarted, .bootstrapCompleted, .lifecycleChanged,
@@ -294,6 +304,8 @@ public struct CollectionTraceEvent: Sendable, Hashable {
         case .transactionStarted, .optimisticMutationRecorded, .mutationMerged,
              .transactionPersisted, .dispatchEnqueued, .dispatchStarted,
              .handlerInvoked, .mutationResolved:
+            .debug
+        case .stagedInsertNoOp, .stagedDeletePreserved:
             .debug
         }
     }

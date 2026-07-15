@@ -301,6 +301,7 @@ package enum CollectionRowPatcher {
 
 public enum CollectionSyncState: String, Sendable, Codable, Hashable {
     case synced
+    case stagedCreate
     case pendingCreate
     case pendingUpdate
     case pendingDelete

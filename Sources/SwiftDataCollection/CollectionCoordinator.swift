@@ -24,6 +24,7 @@ actor CollectionCoordinator<
     private let rowDecoder: CollectionRowDecoder
     private let debugLogger: CollectionDebugLogger
     private let tracer: CollectionTracer
+    private let writeGate: CollectionWriteGate
     private let queue: CollectionMutationQueue
     private let reconciler: CollectionMutationReconciler
     private let retryPolicy: any PendingMutationRetryDelaying
@@ -52,6 +53,7 @@ actor CollectionCoordinator<
         rowDecoder: CollectionRowDecoder,
         debugLogger: CollectionDebugLogger,
         tracer: CollectionTracer,
+        writeGate: CollectionWriteGate = CollectionWriteGate(),
         commitSave: @escaping CollectionCommitSaver = { try $0.save() },
         retryPolicy: any PendingMutationRetryDelaying = CollectionRetryPolicy(),
         retrySleep: @escaping CollectionRetrySleeper = defaultCollectionRetrySleep,
@@ -65,6 +67,7 @@ actor CollectionCoordinator<
         self.rowDecoder = rowDecoder
         self.debugLogger = debugLogger
         self.tracer = tracer
+        self.writeGate = writeGate
         self.queue = CollectionMutationQueue(modelContainer: modelContainer)
         self.reconciler = CollectionMutationReconciler(modelContainer: modelContainer)
         self.commitSave = commitSave
@@ -131,12 +134,14 @@ actor CollectionCoordinator<
                         metadata: transactionTraceMetadata(transaction)
                     )
                 case .immediate:
-                    reconciler.resolveTransaction(id: transaction.id, collectionID: collectionID)
+                    writeGate.withCriticalSection {
+                        reconciler.resolveTransaction(id: transaction.id, collectionID: collectionID)
+                    }
                 }
             }
         }
 
-        try? queue.saveContext()
+        try? saveQueueContext()
         refreshPendingModelStates()
         await drainDispatchIfNeeded()
         trace(
@@ -248,7 +253,188 @@ actor CollectionCoordinator<
         }
     }
 
+    func stageInsert(
+        _ build: @escaping @Sendable () throws -> Model
+    ) async throws -> StagedInsertOutcome {
+        await bootstrapIfNeeded()
+        let proposed = try build()
+        let key = configuration.identifier.key(for: proposed)
+        guard key.isEmpty == false else {
+            throw CollectionError.missingStableIdentifier
+        }
+
+        let outcome = try writeGate.withCriticalSection {
+            let context = ModelContext(modelContainer)
+            let pending = CollectionMutationReconciler.unresolvedMutations(
+                modelName: configuration.modelName,
+                targetKey: key,
+                in: context
+            )
+            guard pending.isEmpty else {
+                throw CollectionError.stagedOperationHasPendingMutations(key: key, count: pending.count)
+            }
+            if let existing = try fetchModel(key: key, in: context) {
+                switch existing.collectionSyncState {
+                case .stagedCreate:
+                    return StagedInsertOutcome.alreadyStaged
+                case .synced:
+                    return StagedInsertOutcome.alreadySynced
+                default:
+                    throw CollectionError.invalidStagedTransition(
+                        key: key,
+                        state: existing.collectionSyncState
+                    )
+                }
+            }
+
+            proposed.collectionSyncState = .stagedCreate
+            proposed.collectionPendingMutationCount = 0
+            context.insert(proposed)
+            try commitSave(context)
+            return StagedInsertOutcome.inserted
+        }
+
+        let previousSyncState: String = switch outcome {
+        case .inserted: "absent"
+        case .alreadyStaged: String(describing: CollectionSyncState.stagedCreate)
+        case .alreadySynced: String(describing: CollectionSyncState.synced)
+        }
+        let resultingSyncState: String = switch outcome {
+        case .inserted, .alreadyStaged: String(describing: CollectionSyncState.stagedCreate)
+        case .alreadySynced: String(describing: CollectionSyncState.synced)
+        }
+        trace(
+            outcome == .inserted ? .stagedInsertCreated : .stagedInsertNoOp,
+            key: key,
+            pendingMutationCount: 0,
+            message: outcome == .inserted ? "persisted staged insert" : "staged insert was idempotent",
+            metadata: [
+                "outcome": String(describing: outcome),
+                "previousSyncState": previousSyncState,
+                "resultingSyncState": resultingSyncState,
+                "raceOutcome": outcome == .alreadySynced ? "adapterWon" : "none",
+            ]
+        )
+        return outcome
+    }
+
+    func updateStaged(
+        _ key: ID,
+        _ mutate: @escaping @Sendable (Model) throws -> Void
+    ) async throws {
+        await bootstrapIfNeeded()
+        let serializedKey = configuration.identifier.serialize(key)
+        guard serializedKey.isEmpty == false else {
+            throw CollectionError.missingStableIdentifier
+        }
+        try writeGate.withCriticalSection {
+            let context = ModelContext(modelContainer)
+            let pending = CollectionMutationReconciler.unresolvedMutations(
+                modelName: configuration.modelName,
+                targetKey: serializedKey,
+                in: context
+            )
+            guard pending.isEmpty else {
+                throw CollectionError.stagedOperationHasPendingMutations(
+                    key: serializedKey,
+                    count: pending.count
+                )
+            }
+            guard let model = try fetchModel(key: serializedKey, in: context) else {
+                throw CollectionError.modelNotFound(serializedKey)
+            }
+            guard model.collectionSyncState == .stagedCreate else {
+                throw CollectionError.invalidStagedTransition(
+                    key: serializedKey,
+                    state: model.collectionSyncState
+                )
+            }
+            try mutate(model)
+            let actualKey = configuration.identifier.key(for: model)
+            guard actualKey == serializedKey else {
+                throw CollectionError.stableIdentifierChanged(
+                    expected: serializedKey,
+                    actual: actualKey
+                )
+            }
+            model.collectionSyncState = .stagedCreate
+            model.collectionPendingMutationCount = 0
+            try commitSave(context)
+        }
+        trace(
+            .stagedInsertUpdated,
+            key: serializedKey,
+            pendingMutationCount: 0,
+            message: "updated staged insert",
+            metadata: [
+                "previousSyncState": String(describing: CollectionSyncState.stagedCreate),
+                "resultingSyncState": String(describing: CollectionSyncState.stagedCreate),
+                "outcome": "updated",
+            ]
+        )
+    }
+
+    func publishStagedInsert(
+        _ key: ID,
+        metadata: [String: CollectionValue]
+    ) async throws -> CollectionTransaction {
+        try await performTransaction(promotingExistingCreate: true) { builder in
+            try builder.insertExisting(key, metadata: metadata)
+        }
+    }
+
+    func discardStagedInsert(_ key: ID) async throws {
+        await bootstrapIfNeeded()
+        let serializedKey = configuration.identifier.serialize(key)
+        guard serializedKey.isEmpty == false else {
+            throw CollectionError.missingStableIdentifier
+        }
+        try writeGate.withCriticalSection {
+            let context = ModelContext(modelContainer)
+            let pending = CollectionMutationReconciler.unresolvedMutations(
+                modelName: configuration.modelName,
+                targetKey: serializedKey,
+                in: context
+            )
+            guard pending.isEmpty else {
+                throw CollectionError.stagedOperationHasPendingMutations(
+                    key: serializedKey,
+                    count: pending.count
+                )
+            }
+            guard let model = try fetchModel(key: serializedKey, in: context) else {
+                throw CollectionError.modelNotFound(serializedKey)
+            }
+            guard model.collectionSyncState == .stagedCreate else {
+                throw CollectionError.invalidStagedTransition(
+                    key: serializedKey,
+                    state: model.collectionSyncState
+                )
+            }
+            context.delete(model)
+            try commitSave(context)
+        }
+        trace(
+            .stagedInsertDiscarded,
+            key: serializedKey,
+            pendingMutationCount: 0,
+            message: "discarded staged insert",
+            metadata: [
+                "previousSyncState": String(describing: CollectionSyncState.stagedCreate),
+                "resultingSyncState": "absent",
+                "outcome": "discarded",
+            ]
+        )
+    }
+
     func transaction(
+        _ body: @escaping @Sendable (CollectionTransactionBuilder<Model, ID>) throws -> Void
+    ) async throws -> CollectionTransaction {
+        try await performTransaction(promotingExistingCreate: false, body)
+    }
+
+    private func performTransaction(
+        promotingExistingCreate: Bool,
         _ body: @escaping @Sendable (CollectionTransactionBuilder<Model, ID>) throws -> Void
     ) async throws -> CollectionTransaction {
         await bootstrapIfNeeded()
@@ -274,7 +460,9 @@ actor CollectionCoordinator<
 
         do {
             try body(builder)
-            let preparedTransaction = builder.preparedTransaction()
+            let preparedTransaction = builder.preparedTransaction(
+                promotingExistingCreate: promotingExistingCreate
+            )
 
             if preparedTransaction.isEmpty {
                 trace(
@@ -310,6 +498,20 @@ actor CollectionCoordinator<
                 pendingMutationCount: preparedTransaction.mutations.count,
                 message: "persisted transaction to durable outbox"
             )
+            if promotingExistingCreate {
+                trace(
+                    .stagedInsertPublished,
+                    transactionID: liveTransaction.id,
+                    key: preparedTransaction.touchedKeys.first,
+                    pendingMutationCount: preparedTransaction.mutations.count,
+                    message: "published staged insert",
+                    metadata: [
+                        "previousSyncState": String(describing: CollectionSyncState.stagedCreate),
+                        "resultingSyncState": String(describing: CollectionSyncState.pendingCreate),
+                        "outcome": "published",
+                    ]
+                )
+            }
 
             trace(
                 .dispatchEnqueued,
@@ -357,12 +559,14 @@ actor CollectionCoordinator<
             debug("observed tokens \(observedTokens.map(tokenString).sorted()) for source \(sourceID)")
         }
 
-        let completedTransactionIDs = reconciler.resolveTransactions(
-            observedTokens: observedTokens,
-            collectionID: collectionID,
-            remainingTokensByTransactionID: &remainingTokensByTransactionID,
-            awaitedTransactionIDsByToken: &awaitedTransactionIDsByToken
-        )
+        let completedTransactionIDs = writeGate.withCriticalSection {
+            reconciler.resolveTransactions(
+                observedTokens: observedTokens,
+                collectionID: collectionID,
+                remainingTokensByTransactionID: &remainingTokensByTransactionID,
+                awaitedTransactionIDsByToken: &awaitedTransactionIDsByToken
+            )
+        }
         for transactionID in completedTransactionIDs {
             if let liveTransaction = liveTransactions.removeValue(forKey: transactionID) {
                 await liveTransaction.complete()
@@ -385,7 +589,9 @@ actor CollectionCoordinator<
         awaitingRefreshTransactionIDs.removeAll()
 
         for transactionID in transactionIDs {
-            reconciler.resolveTransaction(id: transactionID, collectionID: collectionID)
+            writeGate.withCriticalSection {
+                reconciler.resolveTransaction(id: transactionID, collectionID: collectionID)
+            }
             if let liveTransaction = liveTransactions.removeValue(forKey: transactionID) {
                 await liveTransaction.complete()
             }
@@ -507,7 +713,7 @@ actor CollectionCoordinator<
             mutation.errorMessage = nil
             mutation.nextRetryAt = nil
         }
-        try? queue.saveContext()
+        try? saveQueueContext()
         refreshPendingModelStates(keys: touchedKeys)
 
         let transaction = liveTransactions[id] ?? CollectionTransaction(id: id, collectionID: collectionID)
@@ -537,9 +743,14 @@ actor CollectionCoordinator<
                 let immediateCompletion: CollectionMutationCompletion = .immediate
                 for representedTransaction in representedTransactions {
                     representedTransaction.setCompletion(immediateCompletion)
-                    reconciler.resolveTransaction(id: representedTransaction.id, collectionID: collectionID)
+                    writeGate.withCriticalSection {
+                        reconciler.resolveTransaction(
+                            id: representedTransaction.id,
+                            collectionID: collectionID
+                        )
+                    }
                 }
-                try queue.saveContext()
+                try saveQueueContext()
                 refreshPendingModelStates(keys: touchedKeys)
                 for representedTransaction in representedTransactions {
                     if let liveTransaction = liveTransactions.removeValue(forKey: representedTransaction.id) {
@@ -570,7 +781,7 @@ actor CollectionCoordinator<
                     mutation.status = .awaitingSync
                     mutation.errorMessage = nil
                 }
-                try queue.saveContext()
+                try saveQueueContext()
                 refreshPendingModelStates(keys: touchedKeys)
 
                 for representedTransaction in representedTransactions {
@@ -604,7 +815,7 @@ actor CollectionCoordinator<
                     mutation.status = .awaitingSync
                     mutation.errorMessage = nil
                 }
-                try queue.saveContext()
+                try saveQueueContext()
                 refreshPendingModelStates(keys: touchedKeys)
                 for representedTransaction in representedTransactions {
                     awaitingRefreshTransactionIDs.insert(representedTransaction.id)
@@ -638,7 +849,7 @@ actor CollectionCoordinator<
                     mutation.errorMessage = String(describing: error)
                     mutation.nextRetryAt = nil
                 }
-                try? queue.saveContext()
+                try? saveQueueContext()
             } else {
                 for representedTransaction in representedTransactions {
                     representedTransaction.markFailed(error, retryPolicy: retryPolicy)
@@ -646,7 +857,7 @@ actor CollectionCoordinator<
                 for mutation in stateMutations {
                     mutation.markFailed(error, retryPolicy: retryPolicy)
                 }
-                try? queue.saveContext()
+                try? saveQueueContext()
             }
 
             refreshPendingModelStates(keys: touchedKeys)
@@ -737,7 +948,7 @@ actor CollectionCoordinator<
                 mutation.nextRetryAt = now
             }
         }
-        try? queue.saveContext()
+        try? saveQueueContext()
     }
 
     private func commitPreparedTransaction(
@@ -745,34 +956,40 @@ actor CollectionCoordinator<
         pendingTransaction: PendingCollectionTransaction,
         persistedMutations: [PendingCollectionMutation]
     ) throws {
-        let context = ModelContext(modelContainer)
-        context.insert(pendingTransaction)
-        for mutation in persistedMutations {
-            context.insert(mutation)
-        }
+        try writeGate.withCriticalSection {
+            let context = ModelContext(modelContainer)
+            try validatePromotions(
+                preparedTransaction.optimisticChanges,
+                in: context
+            )
+            context.insert(pendingTransaction)
+            for mutation in persistedMutations {
+                context.insert(mutation)
+            }
 
-        try applyOptimisticChanges(
-            preparedTransaction.optimisticChanges,
-            in: context
-        )
+            try applyOptimisticChanges(
+                preparedTransaction.optimisticChanges,
+                in: context
+            )
 
-        for key in preparedTransaction.touchedKeys {
-            try CollectionMutationReconciler.refreshModelState(
-                for: Model.self,
-                key: key,
-                modelName: configuration.modelName,
-                identifier: configuration.identifier,
+            for key in preparedTransaction.touchedKeys {
+                try CollectionMutationReconciler.refreshModelState(
+                    for: Model.self,
+                    key: key,
+                    modelName: configuration.modelName,
+                    identifier: configuration.identifier,
+                    in: context
+                )
+            }
+
+            try commitSave(context)
+
+            try traceCommittedOptimisticChanges(
+                preparedTransaction.mutations,
+                transactionID: preparedTransaction.transactionID,
                 in: context
             )
         }
-
-        try commitSave(context)
-
-        try traceCommittedOptimisticChanges(
-            preparedTransaction.mutations,
-            transactionID: preparedTransaction.transactionID,
-            in: context
-        )
     }
 
     private struct CompactedDispatch {
@@ -952,6 +1169,12 @@ actor CollectionCoordinator<
             case .create(_, let row):
                 let model = try Model(collectionRow: row, decoder: rowDecoder)
                 context.insert(model)
+            case .promoteExistingCreate(let key, _):
+                guard let model = try fetchModel(key: key, in: context) else {
+                    throw CollectionError.modelNotFound(key)
+                }
+                model.collectionSyncState = .stagedCreate
+                model.collectionPendingMutationCount = 0
             case .update(let key, let row):
                 guard let model = try fetchModel(key: key, in: context) else {
                     throw CollectionError.modelNotFound(key)
@@ -962,6 +1185,33 @@ actor CollectionCoordinator<
                     throw CollectionError.modelNotFound(key)
                 }
                 model.collectionSyncState = .pendingDelete
+            }
+        }
+    }
+
+    private func validatePromotions(
+        _ changes: [OptimisticModelChange],
+        in context: ModelContext
+    ) throws {
+        for change in changes {
+            guard case .promoteExistingCreate(let key, _) = change else { continue }
+            let pending = CollectionMutationReconciler.unresolvedMutations(
+                modelName: configuration.modelName,
+                targetKey: key,
+                in: context
+            )
+            guard pending.isEmpty else {
+                throw CollectionError.stagedOperationHasPendingMutations(key: key, count: pending.count)
+            }
+            guard let model = try fetchModel(key: key, in: context) else {
+                throw CollectionError.modelNotFound(key)
+            }
+            guard model.collectionSyncState == .stagedCreate else {
+                throw CollectionError.invalidStagedTransition(key: key, state: model.collectionSyncState)
+            }
+            let actualKey = configuration.identifier.key(for: model)
+            guard actualKey == key else {
+                throw CollectionError.stableIdentifierChanged(expected: key, actual: actualKey)
             }
         }
     }
@@ -1023,16 +1273,19 @@ actor CollectionCoordinator<
             )
         }
 
-        for key in keysToRefresh {
-            try? CollectionMutationReconciler.refreshModelState(
-                for: Model.self,
-                key: key,
-                modelName: configuration.modelName,
-                identifier: configuration.identifier,
-                in: queue.context
-            )
+        writeGate.withCriticalSection {
+            let context = ModelContext(modelContainer)
+            for key in keysToRefresh {
+                try? CollectionMutationReconciler.refreshModelState(
+                    for: Model.self,
+                    key: key,
+                    modelName: configuration.modelName,
+                    identifier: configuration.identifier,
+                    in: context
+                )
+            }
+            try? commitSave(context)
         }
-        try? queue.saveContext()
         trace(
             .pendingStateRefreshed,
             pendingMutationCount: queue.fetchAllPendingMutations(collectionID: collectionID).count,
@@ -1078,12 +1331,18 @@ actor CollectionCoordinator<
         if let lastSyncedAt {
             metadata.lastSyncedAt = lastSyncedAt
         }
-        try? queue.saveContext()
+        try? saveQueueContext()
     }
 
     private func debug(_ message: String) {
         debugEvents.append(message)
         debugLogger.log(.debug, category: "CollectionCoordinator", message: message)
+    }
+
+    private func saveQueueContext() throws {
+        try writeGate.withCriticalSection {
+            try queue.saveContext()
+        }
     }
 
     private func tokenString(_ token: String) -> String {

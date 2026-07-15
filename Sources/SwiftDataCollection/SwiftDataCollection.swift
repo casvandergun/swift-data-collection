@@ -155,6 +155,12 @@ public struct CollectionTransactionFailure: Error, Sendable {
     }
 }
 
+public enum StagedInsertOutcome: Sendable, Hashable {
+    case inserted
+    case alreadyStaged
+    case alreadySynced
+}
+
 package protocol CollectionAdapterRuntime: Actor {
     func start() async
     func stop() async
@@ -173,6 +179,7 @@ package struct CollectionAdapterContext<
     package let rowDecoder: CollectionRowDecoder
     package let debugLogger: CollectionDebugLogger
     package let tracer: CollectionTracer
+    package let writeGate: CollectionWriteGate
     package let onApply: CollectionApplyHandler?
     package let reportApplied: @Sendable (Set<String>, Date?, String?) async -> Void
     package let reportRefreshCompleted: @Sendable (Date?) async -> Void
@@ -276,6 +283,10 @@ public struct SwiftDataCollection<Model: SwiftDataCollectionModel, ID: Hashable 
     private let insertClosure: @Sendable (@escaping @Sendable () throws -> Model, [String: CollectionValue]) async throws -> CollectionTransaction
     private let updateClosure: @Sendable (ID, [String: CollectionValue], @escaping @Sendable (Model) throws -> Void) async throws -> CollectionTransaction
     private let deleteClosure: @Sendable (ID, [String: CollectionValue]) async throws -> CollectionTransaction
+    private let stageInsertClosure: @Sendable (@escaping @Sendable () throws -> Model) async throws -> StagedInsertOutcome
+    private let updateStagedClosure: @Sendable (ID, @escaping @Sendable (Model) throws -> Void) async throws -> Void
+    private let publishStagedInsertClosure: @Sendable (ID, [String: CollectionValue]) async throws -> CollectionTransaction
+    private let discardStagedInsertClosure: @Sendable (ID) async throws -> Void
 
     public let sourceID: String
     public let debugName: String
@@ -297,6 +308,12 @@ public struct SwiftDataCollection<Model: SwiftDataCollectionModel, ID: Hashable 
         self.deleteClosure = { key, metadata in
             try await coordinator.delete(key, metadata: metadata)
         }
+        self.stageInsertClosure = { build in try await coordinator.stageInsert(build) }
+        self.updateStagedClosure = { key, mutate in try await coordinator.updateStaged(key, mutate) }
+        self.publishStagedInsertClosure = { key, metadata in
+            try await coordinator.publishStagedInsert(key, metadata: metadata)
+        }
+        self.discardStagedInsertClosure = { key in try await coordinator.discardStagedInsert(key) }
         self.sourceID = sourceID
         self.debugName = debugName
     }
@@ -343,5 +360,29 @@ public struct SwiftDataCollection<Model: SwiftDataCollectionModel, ID: Hashable 
         metadata: [String: CollectionValue] = [:]
     ) async throws -> CollectionTransaction {
         try await deleteClosure(key, metadata)
+    }
+
+    public func stageInsert(
+        _ build: @escaping @Sendable () throws -> Model
+    ) async throws -> StagedInsertOutcome {
+        try await stageInsertClosure(build)
+    }
+
+    public func updateStaged(
+        _ key: ID,
+        _ mutate: @escaping @Sendable (Model) throws -> Void
+    ) async throws {
+        try await updateStagedClosure(key, mutate)
+    }
+
+    public func publishStagedInsert(
+        _ key: ID,
+        metadata: [String: CollectionValue] = [:]
+    ) async throws -> CollectionTransaction {
+        try await publishStagedInsertClosure(key, metadata)
+    }
+
+    public func discardStagedInsert(_ key: ID) async throws {
+        try await discardStagedInsertClosure(key)
     }
 }

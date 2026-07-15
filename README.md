@@ -143,6 +143,60 @@ Core handlers stay sync-agnostic and complete by returning or throwing. Txids do
 
 When a txid is not available, the Electric adapter also exposes `ElectricCollectionSyncUtilities.awaitMatch(...)` for waiting on a matching Electric message after its batch has been applied to SwiftData.
 
+## Durable Staged Inserts
+
+Use a staged insert when a row must exist durably in SwiftData before the application decides whether this client should publish it. A `.stagedCreate` row has no outbound mutation and has not yet been confirmed by the collection's synchronization adapter.
+
+```text
+                         adapter insert/update
+                   ┌─────────────────────────────┐
+                   │                             ▼
+absent ──stage──▶ stagedCreate ──publish──▶ pendingCreate ──sync──▶ synced
+                     │
+                     └──discard─────────────────────────────▶ absent
+```
+
+```swift
+let outcome = try await moments.stageInsert {
+    Moment(id: proposedID, eventID: eventID, startedAt: startedAt)
+}
+
+try await moments.updateStaged(proposedID) { moment in
+    moment.endedAt = endedAt
+}
+
+// If this client becomes responsible for the server write:
+let transaction = try await moments.publishStagedInsert(
+    proposedID,
+    metadata: ["coordinationAttempt": .string(attemptID)]
+)
+
+// Or, after application-owned relationship rebinding:
+try await moments.discardStagedInsert(proposedID)
+```
+
+Staging is idempotent. It returns `.inserted`, `.alreadyStaged`, or `.alreadySynced` and never replaces an existing row. Use `updateStaged` for intentional local changes. Publishing snapshots the staged row's latest values into the normal transaction-first durable outbox without inserting a second SwiftData model.
+
+Only adapter observation, publication, or explicit discard leaves `.stagedCreate`. Timeouts never publish staged work automatically. Adapter deletes, missing Fetch snapshot rows, and Electric `must-refetch` cleanup preserve staged rows.
+
+Managed adapter application and collection writes are serialized per collection. The relevant race outcomes are:
+
+- `.alreadySynced` from `stageInsert` means adapter application won.
+- `invalidStagedTransition(..., .synced)` from publication means adapter resolution won; continue with the synchronized row.
+- The same error from discard means a normal collection delete is required if removal is still intended.
+- A discarded row may be recreated by a later authoritative adapter insert.
+
+Relationship rebinding and referential-integrity decisions remain application-owned. Phase one intentionally has no general authoritative-write API; WebSocket or API responses may decide which key the application stages, but only the synchronization adapter marks that row synchronized.
+
+SwiftData does not support `CollectionSyncState` enum constants in predicates on the package's supported toolchain. To discover unresolved staged rows, fetch the appropriately scoped models and filter them:
+
+```swift
+let stagedMoments = try context.fetch(FetchDescriptor<Moment>())
+    .filter { $0.collectionSyncState == .stagedCreate }
+```
+
+Concurrent use of `ElectricSwiftDataRowApplier` and a managed collection over the same model type is unsupported. The standalone applier preserves staged rows, but it does not participate in the managed collection's write gate.
+
 ## Offline and Retry Behavior
 
 `SwiftDataCollectionStore` is network-aware by default on Apple platforms through `NWPathMonitor`. Local mutations are still accepted while offline: they are applied optimistically to SwiftData and persisted to the durable outbox, but outbound mutation handlers are not invoked until connectivity returns.

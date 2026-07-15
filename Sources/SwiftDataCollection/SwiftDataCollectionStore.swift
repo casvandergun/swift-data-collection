@@ -256,6 +256,7 @@ public actor SwiftDataCollectionStore {
         options: CollectionOptions<Model, ID>
     ) async throws -> CollectionCoordinator<Model, ID> {
         let relay = CollectionAdapterEventRelay<Model, ID>()
+        let writeGate = CollectionWriteGate()
 
         let context = CollectionAdapterContext<Model, ID>(
             modelContainer: modelContainer,
@@ -266,6 +267,7 @@ public actor SwiftDataCollectionStore {
             rowDecoder: rowDecoder,
             debugLogger: debugLogger,
             tracer: tracer,
+            writeGate: writeGate,
             onApply: options.onApply,
             reportApplied: { observedTokens, lastSyncedAt, offset in
                 await relay.reportApplied(
@@ -292,6 +294,7 @@ public actor SwiftDataCollectionStore {
             rowDecoder: rowDecoder,
             debugLogger: debugLogger,
             tracer: tracer,
+            writeGate: writeGate,
             commitSave: commitSave,
             retryPolicy: retryPolicy,
             retrySleep: retrySleep,

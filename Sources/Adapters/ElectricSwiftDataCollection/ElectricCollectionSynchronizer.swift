@@ -28,6 +28,14 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
         let deleted: Bool
     }
 
+    private struct StagedEvent {
+        let kind: CollectionTraceEventKind
+        let key: String
+        let operation: ElectricOperation
+        let offset: String
+        let outcome: String
+    }
+
     init(
         identifier: CollectionModelIdentifier<Model, ID>,
         rowDecoder: CollectionRowDecoder = .init(),
@@ -56,17 +64,28 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
         var insertedCount = 0
         var updatedCount = 0
         var deletedCount = 0
+        var stagedEvents: [StagedEvent] = []
 
         if batch.messages.contains(where: { $0.headers.control == .mustRefetch }) {
-            let refetchDeletedCount = try deleteRefetchableModels(in: context)
-            deletedCount += refetchDeletedCount
+            let refetch = try deleteRefetchableModels(in: context)
+            deletedCount += refetch.deletedCount
+            stagedEvents.append(contentsOf: refetch.preservedStagedKeys.map { key in
+                StagedEvent(
+                    kind: .stagedDeletePreserved,
+                    key: key,
+                    operation: .delete,
+                    offset: batch.state.offset,
+                    outcome: "preservedStagedReset"
+                )
+            })
             logApply(
                 "cleared refetchable models",
                 metadata: [
                     "shapeID": shapeID,
                     "modelName": modelName,
                     "collectionID": collectionID ?? "",
-                    "deletedCount": String(refetchDeletedCount),
+                    "deletedCount": String(refetch.deletedCount),
+                    "preservedStagedKeys": refetch.preservedStagedKeys.joined(separator: ","),
                     "offset": batch.state.offset,
                 ]
             )
@@ -94,6 +113,7 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
                     message: message,
                     shapeID: shapeID,
                     batchState: batch.state,
+                    stagedEvents: &stagedEvents,
                     in: context
                 )
                 resolvedTransactionIDs.formUnion(outcome.resolvedTransactionIDs)
@@ -116,6 +136,7 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
                     message: message,
                     shapeID: shapeID,
                     offset: batch.state.offset,
+                    stagedEvents: &stagedEvents,
                     in: context
                 )
                 resolvedTransactionIDs.formUnion(outcome.resolvedTransactionIDs)
@@ -144,6 +165,16 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
         )
 
         try context.save()
+        for event in stagedEvents {
+            traceStaged(
+                event.kind,
+                key: event.key,
+                operation: event.operation,
+                shapeID: shapeID,
+                offset: event.offset,
+                outcome: event.outcome
+            )
+        }
         let result = ElectricShapeApplyResult(
             resolvedTransactionIDs: Array(resolvedTransactionIDs),
             observedTXIDs: Array(observedTXIDs),
@@ -187,6 +218,7 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
         message: ElectricMessage,
         shapeID: String,
         batchState: ShapeStreamState,
+        stagedEvents: inout [StagedEvent],
         in context: ModelContext
     ) throws -> UpsertOutcome {
         let resolvedTransactionIDs = resolveAwaitingMutations(
@@ -196,6 +228,48 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
             in: context
         )
         let pending = unresolvedMutations(modelName: modelName, targetKey: key, in: context)
+        let collectionRow = CollectionRow(
+            electricRow: row,
+            schema: batchState.schema,
+            collectionSchema: collectionSchema
+        )
+
+        if pending.isEmpty {
+            let stagedOutcome = try CollectionStagedReconciler.applyUpsert(
+                key: key,
+                row: collectionRow,
+                mode: operation == .insert ? .replacement : .patch,
+                identifier: identifier,
+                rowDecoder: rowDecoder,
+                in: context
+            )
+            if stagedOutcome == .resolved {
+                logApply(
+                    "resolved staged model from adapter upsert",
+                    metadata: messageMetadata(
+                        message,
+                        shapeID: shapeID,
+                        offset: batchState.offset,
+                        extra: [
+                            "modelName": modelName,
+                            "collectionID": collectionID ?? "",
+                            "key": key,
+                            "outcome": "resolvedStaged",
+                        ]
+                    )
+                )
+                stagedEvents.append(
+                    StagedEvent(
+                        kind: .stagedInsertResolved,
+                        key: key,
+                        operation: operation,
+                        offset: batchState.offset,
+                        outcome: "resolved"
+                    )
+                )
+                return UpsertOutcome(resolvedTransactionIDs: resolvedTransactionIDs, change: .updated)
+            }
+        }
 
         if pending.contains(where: { $0.operation == .delete }) {
             logApply(
@@ -224,11 +298,6 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
 
         if let existing = try fetchModel(key: key, in: context) {
             let localRow = try existing.collectionRow()
-            let collectionRow = CollectionRow(
-                electricRow: row,
-                schema: batchState.schema,
-                collectionSchema: collectionSchema
-            )
             if pending.isEmpty {
                 let appliedRow = if operation == .update {
                     CollectionRowPatcher.applying(patch: collectionRow, to: localRow)
@@ -318,11 +387,6 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
             return UpsertOutcome(resolvedTransactionIDs: resolvedTransactionIDs, change: .updated)
         }
 
-        let collectionRow = CollectionRow(
-            electricRow: row,
-            schema: batchState.schema,
-            collectionSchema: collectionSchema
-        )
         let merged = pending.isEmpty
             ? collectionRow
             : CollectionRowPatcher.applying(
@@ -413,6 +477,7 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
         message: ElectricMessage,
         shapeID: String,
         offset: String,
+        stagedEvents: inout [StagedEvent],
         in context: ModelContext
     ) throws -> DeleteOutcome {
         let resolvedTransactionIDs = resolveAwaitingMutations(
@@ -422,6 +487,38 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
             in: context
         )
         let pending = unresolvedMutations(modelName: modelName, targetKey: key, in: context)
+
+        if pending.isEmpty,
+           try CollectionStagedReconciler.preserveDelete(
+               key: key,
+               identifier: identifier,
+               in: context
+           ) == .preservedDelete {
+            logApply(
+                "preserved staged model during adapter delete",
+                metadata: messageMetadata(
+                    message,
+                    shapeID: shapeID,
+                    offset: offset,
+                    extra: [
+                        "modelName": modelName,
+                        "collectionID": collectionID ?? "",
+                        "key": key,
+                        "outcome": "preservedStaged",
+                    ]
+                )
+            )
+            stagedEvents.append(
+                StagedEvent(
+                    kind: .stagedDeletePreserved,
+                    key: key,
+                    operation: .delete,
+                    offset: offset,
+                    outcome: "preservedStaged"
+                )
+            )
+            return DeleteOutcome(resolvedTransactionIDs: resolvedTransactionIDs, deleted: false)
+        }
 
         if pending.contains(where: { $0.operation == .delete }) {
             logApply(
@@ -599,14 +696,56 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
         return try context.fetch(descriptor).first
     }
 
-    private func deleteRefetchableModels(in context: ModelContext) throws -> Int {
+    private func deleteRefetchableModels(
+        in context: ModelContext
+    ) throws -> (deletedCount: Int, preservedStagedKeys: [String]) {
         let models = try context.fetch(FetchDescriptor<Model>())
         var deletedCount = 0
+        var preservedStagedKeys: [String] = []
         for model in models where model.collectionPendingMutationCount == 0 {
+            if model.collectionSyncState == .stagedCreate {
+                preservedStagedKeys.append(identifier.key(for: model))
+                continue
+            }
             context.delete(model)
             deletedCount += 1
         }
-        return deletedCount
+        return (deletedCount, preservedStagedKeys)
+    }
+
+    private func traceStaged(
+        _ kind: CollectionTraceEventKind,
+        key: String,
+        operation: ElectricOperation,
+        shapeID: String,
+        offset: String,
+        outcome: String
+    ) {
+        guard let collectionID else { return }
+        tracer.record(
+            CollectionTraceEvent(
+                kind: kind,
+                collectionID: collectionID,
+                shapeID: shapeID,
+                modelName: modelName,
+                key: key,
+                operation: collectionOperation(from: operation),
+                offset: offset,
+                message: kind == .stagedInsertResolved
+                    ? "adapter resolved staged insert"
+                    : "adapter preserved staged insert during delete",
+                metadata: [
+                    "outcome": outcome,
+                    "adapterOperation": outcome == "preservedStagedReset"
+                        ? "mustRefetch"
+                        : String(describing: operation),
+                    "previousSyncState": String(describing: CollectionSyncState.stagedCreate),
+                    "resultingSyncState": kind == .stagedInsertResolved
+                        ? String(describing: CollectionSyncState.synced)
+                        : String(describing: CollectionSyncState.stagedCreate),
+                ]
+            )
+        )
     }
 
     private func logSkip(

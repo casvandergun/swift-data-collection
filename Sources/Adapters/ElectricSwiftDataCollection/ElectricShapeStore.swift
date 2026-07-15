@@ -33,6 +33,7 @@ public actor ElectricShapeStore {
     private let rowDecoder: CollectionRowDecoder
     private let debugLogger: ElectricDebugLogger
     private let sessionFactory: SessionFactory
+    private let writeGate: CollectionWriteGate?
     private var observer: (any ElectricShapeStoreObserver)?
     private var batchAppliers: [String: ElectricShapeBatchApplyClosure] = [:]
 
@@ -62,6 +63,33 @@ public actor ElectricShapeStore {
                 debugLogger: debugLogger
             )
         }
+        self.writeGate = nil
+        self.observer = observer
+    }
+
+    package init(
+        shapeURL: URL,
+        modelContainer: ModelContainer,
+        session: URLSession = .shared,
+        rowDecoder: CollectionRowDecoder = .init(),
+        debugLogger: ElectricDebugLogger = .disabled,
+        observer: (any ElectricShapeStoreObserver)? = nil,
+        writeGate: CollectionWriteGate
+    ) {
+        self.shapeURL = shapeURL
+        self.modelContainer = modelContainer
+        self.session = session
+        self.rowDecoder = rowDecoder
+        self.debugLogger = debugLogger
+        self.sessionFactory = { options, initialState, debugLogger in
+            ShapeStream(
+                options: options,
+                configuration: .init(initialState: initialState),
+                session: session,
+                debugLogger: debugLogger
+            )
+        }
+        self.writeGate = writeGate
         self.observer = observer
     }
 
@@ -80,6 +108,7 @@ public actor ElectricShapeStore {
         self.rowDecoder = rowDecoder
         self.debugLogger = debugLogger
         self.sessionFactory = sessionFactory
+        self.writeGate = nil
         self.observer = observer
     }
 
@@ -250,11 +279,11 @@ public actor ElectricShapeStore {
         let debugLogger = self.debugLogger
         let observer = self.observer
         let batchApplier = self.batchAppliers[shapeID]
+        let writeGate = self.writeGate
 
         runningTasks[shapeID] = Task {
             do {
                 for try await batch in await stream.batches() {
-                    let context = ModelContext(modelContainer)
                     guard let batchApplier else {
                         throw ElectricShapeStoreError.missingBatchApplier(shapeID: shapeID)
                     }
@@ -270,7 +299,15 @@ public actor ElectricShapeStore {
                             "offset": batch.state.offset,
                         ]
                     )
-                    let result = try batchApplier(batch, shapeID, context)
+                    let applyBatch = {
+                        let context = ModelContext(modelContainer)
+                        return try batchApplier(batch, shapeID, context)
+                    }
+                    let result = if let writeGate {
+                        try writeGate.withCriticalSection(applyBatch)
+                    } else {
+                        try applyBatch()
+                    }
                     debugLogger.log(
                         .info,
                         category: "ShapeBatch",
