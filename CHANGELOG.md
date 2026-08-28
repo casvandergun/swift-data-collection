@@ -13,6 +13,8 @@ All notable package changes are tracked here by release.
 - Pause outbound outbox dispatch while offline, keep optimistic SwiftData writes durable, and resume eligible work on reconnect.
 - Made failed transactions eligible for immediate retry when connectivity returns.
 - Added `CollectionNonRetriableError` for permanent handler failures that should mark local state conflicted instead of retrying.
+- Added `CollectionDispatchWait` so a collection can choose whether writes return once durably queued or once outbound dispatch has been attempted. The default, `.dispatchAttempted`, preserves existing behaviour; `.durablyQueued` keeps latency-sensitive local-first writes off the network round trip.
+- Exposed `SwiftDataCollection.flush()` so callers can drain pending dispatch explicitly, which `.durablyQueued` collections need in tests and shutdown paths.
 - Documented current TanStack offline-transaction parity, intentional SwiftData/Electric differences, and future cross-collection scheduling work.
 
 ## v0.1.2 - 2026-07-04

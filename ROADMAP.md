@@ -36,9 +36,18 @@ Ship the offline transaction hardening already on `main` and decide the next sch
 - Durable `.stagedCreate` rows with stage, local update, publish, and discard operations.
 - Per-collection serialization of managed coordinator and adapter SwiftData writes.
 - Adapter-driven resolution of staged rows, with staged work preserved during deletes and resets.
+- Per-collection `CollectionDispatchWait`, defaulting to the existing `.dispatchAttempted` behaviour, plus a public `flush()` for explicit drains.
 
 ### Planned Decisions
 
+- Decide whether `.durablyQueued` should become the default `CollectionDispatchWait`, and in which version.
+  Awaiting dispatch inside a write is arguably at odds with the package's local-first stance: on a slow
+  network it turns an offline-capable local write into a stall. It is also observable behaviour that
+  callers depend on today -- post-dispatch state such as `awaitingSync` and `conflicted` is readable the
+  moment a write returns, and the package's own tests assert exactly that. Flipping the default is
+  therefore a breaking change that requires migrating those tests onto `flush()` or
+  `CollectionTransaction.wait()`, and it belongs in a deliberate major version rather than alongside
+  other work.
 - Decide whether cross-collection ordering should be implemented as:
   - explicit transaction dependencies such as `dependsOnTransactionIDs` or `dependsOnKeys`
   - a store-level scheduler with global FIFO dispatch

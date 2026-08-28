@@ -203,6 +203,26 @@ public struct CollectionAdapter<
     }
 }
 
+/*
+ * How long a write waits before returning.
+ *
+ * `dispatchAttempted` keeps the original behaviour: the call returns once the
+ * outbound dispatch for the transaction has settled, so post-dispatch state
+ * (`awaitingSync`, `conflicted`) is observable the moment the write returns.
+ *
+ * `durablyQueued` returns as soon as the transaction is committed to the
+ * outbox and leaves dispatch to the runtime. Prefer it wherever a write sits
+ * on a latency-sensitive path: a local-first write should not wait on a round
+ * trip, and on a slow network `dispatchAttempted` makes it do exactly that.
+ * Durability is identical either way -- the outbox row is committed before
+ * dispatch begins in both modes. Callers that still need the round trip await
+ * `CollectionTransaction.wait()`, or drain the collection with `flush()`.
+ */
+public enum CollectionDispatchWait: String, Sendable, Hashable, Codable {
+    case dispatchAttempted
+    case durablyQueued
+}
+
 public struct CollectionOptions<
     Model: SwiftDataCollectionModel,
     ID: Hashable & Sendable
@@ -212,6 +232,7 @@ public struct CollectionOptions<
     public let identifier: CollectionModelIdentifier<Model, ID>
     public let adapter: CollectionAdapter<Model, ID>
     public let onApply: CollectionApplyHandler?
+    public let dispatchWait: CollectionDispatchWait
     package let onInsert: CollectionAdapterMutationHandler<Model, ID>?
     package let onUpdate: CollectionAdapterMutationHandler<Model, ID>?
     package let onDelete: CollectionAdapterMutationHandler<Model, ID>?
@@ -222,6 +243,7 @@ public struct CollectionOptions<
         modelName: String = String(reflecting: Model.self),
         adapter: CollectionAdapter<Model, ID>,
         onApply: CollectionApplyHandler? = nil,
+        dispatchWait: CollectionDispatchWait = .dispatchAttempted,
         onInsert: CollectionMutationHandler<Model, ID>? = nil,
         onUpdate: CollectionMutationHandler<Model, ID>? = nil,
         onDelete: CollectionMutationHandler<Model, ID>? = nil
@@ -232,6 +254,7 @@ public struct CollectionOptions<
             modelName: modelName,
             adapter: adapter,
             onApply: onApply,
+            dispatchWait: dispatchWait,
             onInsert: onInsert.map { handler in
                 { @Sendable context in
                     try await handler(context)
@@ -259,6 +282,7 @@ public struct CollectionOptions<
         modelName: String = String(reflecting: Model.self),
         adapter: CollectionAdapter<Model, ID>,
         onApply: CollectionApplyHandler? = nil,
+        dispatchWait: CollectionDispatchWait = .dispatchAttempted,
         onInsert: CollectionAdapterMutationHandler<Model, ID>? = nil,
         onUpdate: CollectionAdapterMutationHandler<Model, ID>? = nil,
         onDelete: CollectionAdapterMutationHandler<Model, ID>? = nil
@@ -268,6 +292,7 @@ public struct CollectionOptions<
         self.identifier = identifier
         self.adapter = adapter
         self.onApply = onApply
+        self.dispatchWait = dispatchWait
         self.onInsert = onInsert
         self.onUpdate = onUpdate
         self.onDelete = onDelete
@@ -278,6 +303,7 @@ public struct SwiftDataCollection<Model: SwiftDataCollectionModel, ID: Hashable 
     private let startClosure: @Sendable () async -> Void
     private let stopClosure: @Sendable () async -> Void
     private let refreshClosure: @Sendable () async -> Void
+    private let flushClosure: @Sendable () async -> Void
     private let statusClosure: @Sendable () async -> CollectionLifecycleState
     private let transactionClosure: @Sendable (@escaping @Sendable (CollectionTransactionBuilder<Model, ID>) throws -> Void) async throws -> CollectionTransaction
     private let insertClosure: @Sendable (@escaping @Sendable () throws -> Model, [String: CollectionValue]) async throws -> CollectionTransaction
@@ -299,6 +325,7 @@ public struct SwiftDataCollection<Model: SwiftDataCollectionModel, ID: Hashable 
         self.startClosure = { await coordinator.start() }
         self.stopClosure = { await coordinator.stop() }
         self.refreshClosure = { await coordinator.refresh() }
+        self.flushClosure = { await coordinator.flush() }
         self.statusClosure = { await coordinator.status() }
         self.transactionClosure = { body in try await coordinator.transaction(body) }
         self.insertClosure = { build, metadata in try await coordinator.insert(build, metadata: metadata) }
@@ -328,6 +355,17 @@ public struct SwiftDataCollection<Model: SwiftDataCollectionModel, ID: Hashable 
 
     public func refresh() async {
         await refreshClosure()
+    }
+
+    /// Drains any transactions waiting to be dispatched and returns once the
+    /// drain settles.
+    ///
+    /// Writes return as soon as they are durably queued, so this is how a
+    /// caller that must observe outbound dispatch -- a test, or a shutdown
+    /// path -- waits for it. Awaiting a single transaction's round trip is
+    /// `CollectionTransaction.wait()`.
+    public func flush() async {
+        await flushClosure()
     }
 
     public var status: CollectionLifecycleState {

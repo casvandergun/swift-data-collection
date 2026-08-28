@@ -130,6 +130,7 @@ extension SwiftDataCollectionStore {
         extraParameters: [String: String] = [:],
         debugName: String? = nil,
         onApply: CollectionApplyHandler? = nil,
+        dispatchWait: CollectionDispatchWait = .dispatchAttempted,
         onInsert: ElectricMutationHandler<Model, ID>? = nil,
         onUpdate: ElectricMutationHandler<Model, ID>? = nil,
         onDelete: ElectricMutationHandler<Model, ID>? = nil
@@ -148,6 +149,7 @@ extension SwiftDataCollectionStore {
                 headers: headers,
                 extraParameters: extraParameters,
                 onApply: onApply,
+                dispatchWait: dispatchWait,
                 onInsert: onInsert,
                 onUpdate: onUpdate,
                 onDelete: onDelete

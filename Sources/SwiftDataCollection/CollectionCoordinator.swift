@@ -520,7 +520,12 @@ actor CollectionCoordinator<
                 pendingMutationCount: preparedTransaction.mutations.count,
                 message: "enqueued transaction for dispatch"
             )
-            await enqueueDispatch(ids: [liveTransaction.id])
+            switch configuration.dispatchWait {
+            case .durablyQueued:
+                enqueueDispatchWithoutWaiting(ids: [liveTransaction.id])
+            case .dispatchAttempted:
+                await enqueueDispatch(ids: [liveTransaction.id])
+            }
             return liveTransaction
         } catch {
             liveTransactions.removeValue(forKey: liveTransaction.id)
@@ -620,13 +625,36 @@ actor CollectionCoordinator<
     }
 
     private func enqueueDispatch(ids: [UUID]) async {
+        appendPendingDispatch(ids: ids)
+        await drainDispatchIfNeeded()
+    }
+
+    /*
+     * A write returns once its transaction is durably queued. Reaching the
+     * server is the outbox's job, not the caller's: draining inline made every
+     * local write wait for a round trip, which on a slow network turns an
+     * offline-capable write into a stall.
+     *
+     * Enqueueing stays synchronous so `pendingDispatchIDs` keeps call order;
+     * only the drain is handed to a task. A drain already in progress picks up
+     * the appended ids on its next loop, and the re-entrancy guard makes the
+     * extra task a no-op.
+     *
+     * Callers that genuinely need the round trip await
+     * `CollectionTransaction.wait()`; tests force a drain with `flush()`.
+     */
+    private func enqueueDispatchWithoutWaiting(ids: [UUID]) {
+        appendPendingDispatch(ids: ids)
+        Task { await self.drainDispatchIfNeeded() }
+    }
+
+    private func appendPendingDispatch(ids: [UUID]) {
         if ids.isEmpty == false {
             cancelScheduledRetry()
         }
         for id in ids where pendingDispatchIDs.contains(id) == false {
             pendingDispatchIDs.append(id)
         }
-        await drainDispatchIfNeeded()
     }
 
     private func drainDispatchIfNeeded() async {
