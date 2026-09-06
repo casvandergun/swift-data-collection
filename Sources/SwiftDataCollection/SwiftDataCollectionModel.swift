@@ -349,6 +349,14 @@ public struct CollectionModelIdentifier<Model: PersistentModel, ID: Hashable & S
     public func fetchDescriptor(forSerializedKey key: String) throws -> FetchDescriptor<Model> {
         makeFetchDescriptor(try deserialize(key))
     }
+
+    /// Converts an externally supplied serialized key to this identifier's
+    /// canonical representation. Adapters may receive equivalent spellings
+    /// from a backend (for example, lowercase UUID text from Postgres) while
+    /// local outbox keys use the identifier's serializer.
+    package func canonicalSerializedKey(_ key: String) throws -> String {
+        serialize(try deserialize(key))
+    }
 }
 
 public extension CollectionModelIdentifier where ID == String {

@@ -42,6 +42,7 @@ Ship the offline transaction hardening already on `main` together with coordinat
 - Public conflict snapshots/update streams and atomic group discard with successor payload repair.
 - A schema-composition helper and startup validation for runtime metadata; v0.2.0 uses an explicit hard schema/source migration.
 - Distinct row states: `.error` for retryable failures and `.conflicted` for permanently refused intent.
+- Canonical Electric key normalization keeps backend UUID spelling differences from breaking row materialization or txid reconciliation.
 
 ### Planned Decisions
 

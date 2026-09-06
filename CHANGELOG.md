@@ -12,6 +12,7 @@ All notable package changes are tracked here by release.
 - Renamed transaction and outbox `.awaitingSync` states to `.awaiting`, including the trace lifecycle state and persisted raw value.
 - Corrected Electric and Fetch reconciliation so conflicted mutations remain part of the local overlay until resolved, and made authoritative server absence beneath an update remove the visible row without discarding the retained intent.
 - Kept Electric reset bookkeeping limited to dirty keys while preserving evidence safely across multi-batch snapshots and restart.
+- Canonicalized Electric wire keys through the collection identifier before materialization and reconciliation, including lowercase Postgres UUID keys.
 - Added durable `.stagedCreate` rows with collection APIs to stage, locally update, publish, and discard existing SwiftData models without prematurely creating outbound mutations.
 - Added per-managed-collection write serialization across coordinator commits, Electric batches, and Fetch snapshot application.
 - Added backend-neutral staged reconciliation so adapter upserts resolve staged rows while adapter deletes and resets preserve staged work.

@@ -391,14 +391,14 @@ package struct CollectionMaterializer<
             // a malformed or mismatched persisted row cannot partially mutate
             // the visible SwiftData model.
             let candidate = try Model(collectionRow: row, decoder: rowDecoder)
-            guard identifier.key(for: candidate) == key else {
+            guard try identifier.get(candidate) == identifier.deserialize(key) else {
                 throw CollectionMaterializationError.invalidPersistedRow(key: key)
             }
             try existing.apply(collectionRow: row, decoder: rowDecoder)
             model = existing
         } else {
             model = try Model(collectionRow: row, decoder: rowDecoder)
-            guard identifier.key(for: model) == key else {
+            guard try identifier.get(model) == identifier.deserialize(key) else {
                 throw CollectionMaterializationError.invalidPersistedRow(key: key)
             }
             context.insert(model)

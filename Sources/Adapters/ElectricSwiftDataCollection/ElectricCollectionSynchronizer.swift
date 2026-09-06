@@ -112,7 +112,8 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
                 continue
             }
 
-            let key = message.normalizedKey ?? message.key
+            let wireKey = message.normalizedKey ?? message.key
+            let key = try wireKey.map { try identifier.canonicalSerializedKey($0) }
             let txids = message.headers.txids ?? []
             switch operation {
             case .insert, .update:

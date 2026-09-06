@@ -5,6 +5,140 @@ import Testing
 
 @Suite("Electric SwiftData Batch Application")
 struct ElectricSwiftDataBatchApplicationTests {
+    @Test("Canonicalizes lowercase Electric UUID keys before materialization")
+    func canonicalizesLowercaseElectricUUIDKeys() throws {
+        let configuration = ModelConfiguration(isStoredInMemoryOnly: true)
+        let container = try ModelContainer(
+            for: Schema(SwiftDataCollectionSchema.models(including: [
+                TestUUIDTodo.self,
+                ElectricShapeMetadata.self,
+            ])),
+            configurations: configuration
+        )
+        let context = ModelContext(container)
+        let identifier = CollectionModelIdentifier<TestUUIDTodo, UUID>.uuid(
+            get: \.id,
+            fetchDescriptor: { id in
+                FetchDescriptor(predicate: #Predicate<TestUUIDTodo> { $0.id == id })
+            }
+        )
+        let synchronizer = ElectricCollectionSynchronizer(identifier: identifier)
+        let id = UUID(uuidString: "A1B2C3D4-E5F6-47A8-9012-3456789ABCDE")!
+        let wireKey = id.uuidString.lowercased()
+
+        _ = try synchronizer.apply(
+            ShapeBatch(
+                messages: [
+                    ElectricMessage(
+                        key: "\"public\".\"todos\"/\(wireKey)",
+                        value: [
+                            "id": .string(wireKey),
+                            "title": .string("From Electric"),
+                        ],
+                        headers: .init(operation: .insert)
+                    ),
+                ],
+                state: testShapeState(offset: "1_0"),
+                schema: ["id": ElectricColumnDefinition(type: "uuid")],
+                reachedUpToDate: false
+            ),
+            shapeID: "todos",
+            in: context
+        )
+
+        let inserted = try #require(context.fetch(identifier.fetchDescriptor(for: id)).first)
+        #expect(inserted.id == id)
+        #expect(inserted.title == "From Electric")
+    }
+
+    @Test("Canonicalized Electric UUID keys reconcile pending mutations")
+    func canonicalizedElectricUUIDKeysReconcilePendingMutations() throws {
+        let configuration = ModelConfiguration(isStoredInMemoryOnly: true)
+        let container = try ModelContainer(
+            for: Schema(SwiftDataCollectionSchema.models(including: [
+                TestUUIDTodo.self,
+                ElectricShapeMetadata.self,
+            ])),
+            configurations: configuration
+        )
+        let context = ModelContext(container)
+        let identifier = CollectionModelIdentifier<TestUUIDTodo, UUID>.uuid(
+            get: \.id,
+            fetchDescriptor: { id in
+                FetchDescriptor(predicate: #Predicate<TestUUIDTodo> { $0.id == id })
+            }
+        )
+        let synchronizer = ElectricCollectionSynchronizer(identifier: identifier)
+        let id = UUID(uuidString: "B1C2D3E4-F5A6-47B8-9012-3456789ABCDE")!
+        let canonicalKey = id.uuidString
+        let wireKey = canonicalKey.lowercased()
+        let modelName = String(reflecting: TestUUIDTodo.self)
+        let collectionID = "\(modelName):todos"
+        let localRow: CollectionRow = [
+            "id": .uuid(id),
+            "title": .string("Local"),
+        ]
+
+        let model = TestUUIDTodo(id: id, title: "Server")
+        context.insert(model)
+        let materializer = CollectionMaterializer(
+            context: context,
+            collectionID: collectionID,
+            modelName: modelName,
+            identifier: identifier,
+            rowDecoder: .init()
+        )
+        try materializer.captureBaselineIfNeeded(for: canonicalKey, operation: .update)
+        model.title = "Local"
+
+        let transactionID = UUID()
+        let transaction = PendingCollectionTransaction(
+            id: transactionID,
+            collectionID: collectionID,
+            shapeID: "todos",
+            modelName: modelName,
+            sequenceNumber: 1,
+            status: .awaiting
+        )
+        transaction.awaitedObservationTokens = ["42"]
+        let mutation = PendingCollectionMutation(
+            id: transactionID,
+            transactionID: transactionID,
+            modelName: modelName,
+            shapeID: "todos",
+            targetKey: canonicalKey,
+            operation: .update,
+            payloadData: try JSONEncoder().encode(localRow),
+            changedFieldsData: try JSONEncoder().encode(Set(["title"])),
+            status: .awaiting
+        )
+        context.insert(transaction)
+        context.insert(mutation)
+        try context.save()
+
+        _ = try synchronizer.apply(
+            ShapeBatch(
+                messages: [
+                    ElectricMessage(
+                        key: "\"public\".\"todos\"/\(wireKey)",
+                        value: ["title": .string("Server Updated")],
+                        headers: .init(operation: .update, txids: [42])
+                    ),
+                ],
+                state: testShapeState(offset: "2_0"),
+                schema: [:],
+                reachedUpToDate: false
+            ),
+            shapeID: "todos",
+            in: context
+        )
+
+        let resolved = try #require(context.fetch(identifier.fetchDescriptor(for: id)).first)
+        #expect(resolved.title == "Server Updated")
+        #expect(resolved.collectionSyncState == .synced)
+        #expect(mutation.status == .resolved)
+    }
+
     @Test("Applies insert update delete and metadata")
     func appliesChangeBatches() throws {
         let container = try makeTestContainer()
@@ -721,6 +855,49 @@ struct ElectricSwiftDataBatchApplicationTests {
         #expect(batchEvent.metadata["observedTXIDs"] == "401")
         #expect(batchEvent.offset == "12_0")
     }
+}
+
+@Model
+final class TestUUIDTodo: SwiftDataCollectionModel {
+    var collectionSyncState: CollectionSyncState
+    var collectionPendingMutationCount: Int
+    var id: UUID
+    var title: String
+
+    init(
+        collectionSyncState: CollectionSyncState = .synced,
+        collectionPendingMutationCount: Int = 0,
+        id: UUID,
+        title: String
+    ) {
+        self.collectionSyncState = collectionSyncState
+        self.collectionPendingMutationCount = collectionPendingMutationCount
+        self.id = id
+        self.title = title
+    }
+
+    convenience init(collectionRow: CollectionRow, decoder: CollectionRowDecoder) throws {
+        let value = try decoder.decode(TestUUIDTodoValue.self, from: collectionRow)
+        self.init(id: value.id, title: value.title)
+    }
+
+    func apply(collectionRow: CollectionRow, decoder: CollectionRowDecoder) throws {
+        let value = try decoder.decode(TestUUIDTodoValue.self, from: collectionRow)
+        id = value.id
+        title = value.title
+    }
+
+    func collectionRow() throws -> CollectionRow {
+        [
+            "id": .uuid(id),
+            "title": .string(title),
+        ]
+    }
+}
+
+private struct TestUUIDTodoValue: Decodable {
+    let id: UUID
+    let title: String
 }
 
 @Suite("Electric Shape Store")
