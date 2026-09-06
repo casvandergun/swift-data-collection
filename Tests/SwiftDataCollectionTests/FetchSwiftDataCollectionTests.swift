@@ -128,9 +128,7 @@ struct FetchSwiftDataCollectionTests {
         await collection.refresh()
 
         let context = ModelContext(container)
-        let preserved = try #require(context.fetch(testTodoIdentifier.fetchDescriptor(for: "todo-2")).first)
-        #expect(preserved.title == "Local")
-        #expect(preserved.collectionSyncState == .syncError)
+        #expect(try context.fetch(testTodoIdentifier.fetchDescriptor(for: "todo-2")).isEmpty)
     }
 
     @Test("Keep local rows policy preserves missing rows")
@@ -227,7 +225,7 @@ struct FetchSwiftDataCollectionTests {
         let pending = try #require(context.fetch(FetchDescriptor<PendingCollectionMutation>()).first)
         let todo = try #require(context.fetch(testTodoIdentifier.fetchDescriptor(for: "todo-1")).first)
         #expect(pending.status == .failed)
-        #expect(todo.collectionSyncState == .syncError)
+        #expect(todo.collectionSyncState == .error)
     }
 
     @Test("Fetched stale row preserves pending update changed fields")
@@ -263,7 +261,7 @@ struct FetchSwiftDataCollectionTests {
 
         let context = ModelContext(container)
         let todo = try #require(context.fetch(testTodoIdentifier.fetchDescriptor(for: "todo-1")).first)
-        #expect(todo.title == "Local")
+        #expect(todo.title == "Original")
         #expect(todo.projectID == "server-project")
         #expect(todo.collectionSyncState == .synced)
     }
@@ -276,14 +274,14 @@ struct FetchSwiftDataCollectionTests {
         local.collectionSyncState = .pendingCreate
         local.collectionPendingMutationCount = 1
         context.insert(local)
-        context.insert(
-            try testPendingMutation(
-                key: "todo-1",
-                operation: .create,
-                payload: testTodoCollectionRow(id: "todo-1", projectID: "project-a", title: "Local"),
-                changedFields: ["id", "projectID", "title"],
-                status: .awaitingSync
-            )
+        try insertTransactionBackedMutation(
+            in: context,
+            shapeID: testFetchSourceID,
+            targetKey: "todo-1",
+            operation: .create,
+            payload: testTodoCollectionRow(id: "todo-1", projectID: "project-a", title: "Local"),
+            changedFields: ["id", "projectID", "title"],
+            status: .awaiting
         )
         try context.save()
 
@@ -309,13 +307,13 @@ struct FetchSwiftDataCollectionTests {
         local.collectionSyncState = .pendingDelete
         local.collectionPendingMutationCount = 1
         context.insert(local)
-        context.insert(
-            try testPendingMutation(
-                key: "todo-1",
-                operation: .delete,
-                payload: [:],
-                status: .awaitingSync
-            )
+        try insertTransactionBackedMutation(
+            in: context,
+            shapeID: testFetchSourceID,
+            targetKey: "todo-1",
+            operation: .delete,
+            payload: [:],
+            status: .awaiting
         )
         try context.save()
 
@@ -327,8 +325,8 @@ struct FetchSwiftDataCollectionTests {
         )
 
         let todo = try #require(context.fetch(testTodoIdentifier.fetchDescriptor(for: "todo-1")).first)
-        #expect(todo.title == "Local")
-        #expect(todo.projectID == "project-a")
+        #expect(todo.title == "Server")
+        #expect(todo.projectID == "server-project")
         #expect(todo.collectionSyncState == .pendingDelete)
         #expect(todo.collectionPendingMutationCount == 1)
     }
@@ -338,50 +336,17 @@ struct FetchSwiftDataCollectionTests {
         let container = try makeTestContainer()
         let context = ModelContext(container)
         let local = TestTodo(id: "todo-1", projectID: "project-a", title: "Local")
-        local.collectionSyncState = .syncError
+        local.collectionSyncState = .error
         local.collectionPendingMutationCount = 1
         context.insert(local)
-        context.insert(
-            try testPendingMutation(
-                key: "todo-1",
-                operation: .update,
-                payload: testTodoCollectionRow(id: "todo-1", projectID: "project-a", title: "Local"),
-                changedFields: ["title"],
-                status: .failed
-            )
-        )
-        try context.save()
-
-        _ = try makeTestFetchApplier().apply(
-            [
-                testTodoCollectionRow(id: "todo-1", projectID: "server-project", title: "Server"),
-            ],
-            in: context
-        )
-
-        let todo = try #require(context.fetch(testTodoIdentifier.fetchDescriptor(for: "todo-1")).first)
-        #expect(todo.title == "Local")
-        #expect(todo.projectID == "project-a")
-        #expect(todo.collectionSyncState == .syncError)
-        #expect(todo.collectionPendingMutationCount == 1)
-    }
-
-    @Test("Fetched row preserves conflicted mutation local state")
-    func fetchedRowPreservesConflictedMutationLocalState() throws {
-        let container = try makeTestContainer()
-        let context = ModelContext(container)
-        let local = TestTodo(id: "todo-1", projectID: "project-a", title: "Local")
-        local.collectionSyncState = .syncError
-        local.collectionPendingMutationCount = 1
-        context.insert(local)
-        context.insert(
-            try testPendingMutation(
-                key: "todo-1",
-                operation: .update,
-                payload: testTodoCollectionRow(id: "todo-1", projectID: "project-a", title: "Local"),
-                changedFields: ["title"],
-                status: .conflicted
-            )
+        try insertTransactionBackedMutation(
+            in: context,
+            shapeID: testFetchSourceID,
+            targetKey: "todo-1",
+            operation: .update,
+            payload: testTodoCollectionRow(id: "todo-1", projectID: "project-a", title: "Local"),
+            changedFields: ["title"],
+            status: .failed
         )
         try context.save()
 
@@ -395,35 +360,66 @@ struct FetchSwiftDataCollectionTests {
         let todo = try #require(context.fetch(testTodoIdentifier.fetchDescriptor(for: "todo-1")).first)
         #expect(todo.title == "Local")
         #expect(todo.projectID == "server-project")
-        #expect(todo.collectionSyncState == .syncError)
+        #expect(todo.collectionSyncState == .error)
         #expect(todo.collectionPendingMutationCount == 1)
     }
 
-    @Test("Missing fetched row preserves a row with a conflicted mutation")
-    func missingFetchedRowPreservesConflictedRow() throws {
+    @Test("Fetched row preserves conflicted mutation local state")
+    func fetchedRowPreservesConflictedMutationLocalState() throws {
         let container = try makeTestContainer()
         let context = ModelContext(container)
         let local = TestTodo(id: "todo-1", projectID: "project-a", title: "Local")
-        local.collectionSyncState = .syncError
+        local.collectionSyncState = .conflicted
         local.collectionPendingMutationCount = 1
         context.insert(local)
-        context.insert(
-            try testPendingMutation(
-                key: "todo-1",
-                operation: .update,
-                payload: testTodoCollectionRow(id: "todo-1", projectID: "project-a", title: "Local"),
-                changedFields: ["title"],
-                status: .conflicted
-            )
+        try insertTransactionBackedMutation(
+            in: context,
+            shapeID: testFetchSourceID,
+            targetKey: "todo-1",
+            operation: .update,
+            payload: testTodoCollectionRow(id: "todo-1", projectID: "project-a", title: "Local"),
+            changedFields: ["title"],
+            status: .conflicted
+        )
+        try context.save()
+
+        _ = try makeTestFetchApplier().apply(
+            [
+                testTodoCollectionRow(id: "todo-1", projectID: "server-project", title: "Server"),
+            ],
+            in: context
+        )
+
+        let todo = try #require(context.fetch(testTodoIdentifier.fetchDescriptor(for: "todo-1")).first)
+        #expect(todo.title == "Local")
+        #expect(todo.projectID == "server-project")
+        #expect(todo.collectionSyncState == .conflicted)
+        #expect(todo.collectionPendingMutationCount == 1)
+    }
+
+    @Test("Missing fetched row removes a row with a conflicted update")
+    func missingFetchedRowRemovesConflictedUpdateRow() throws {
+        let container = try makeTestContainer()
+        let context = ModelContext(container)
+        let local = TestTodo(id: "todo-1", projectID: "project-a", title: "Local")
+        local.collectionSyncState = .conflicted
+        local.collectionPendingMutationCount = 1
+        context.insert(local)
+        try insertTransactionBackedMutation(
+            in: context,
+            shapeID: testFetchSourceID,
+            targetKey: "todo-1",
+            operation: .update,
+            payload: testTodoCollectionRow(id: "todo-1", projectID: "project-a", title: "Local"),
+            changedFields: ["title"],
+            status: .conflicted
         )
         try context.save()
 
         _ = try makeTestFetchApplier().apply([], in: context)
 
-        let preserved = try #require(context.fetch(testTodoIdentifier.fetchDescriptor(for: "todo-1")).first)
-        #expect(preserved.title == "Local")
-        #expect(preserved.collectionSyncState == .syncError)
-        #expect(preserved.collectionPendingMutationCount == 1)
+        let rows = try context.fetch(testTodoIdentifier.fetchDescriptor(for: "todo-1"))
+        #expect(rows.isEmpty)
     }
 
     @Test("Repeated identical refreshes are idempotent")
@@ -584,21 +580,4 @@ func makeTestFetchApplier() -> FetchCollectionSnapshotApplier<TestTodo, String> 
     )
 }
 
-func testPendingMutation(
-    key: String,
-    operation: CollectionMutationOperation,
-    payload: CollectionRow,
-    changedFields: Set<String> = [],
-    status: PendingMutationStatus
-) throws -> PendingCollectionMutation {
-    PendingCollectionMutation(
-        transactionID: UUID(),
-        modelName: String(reflecting: TestTodo.self),
-        shapeID: "fetch:\(String(reflecting: TestTodo.self)):all",
-        targetKey: key,
-        operation: operation,
-        payloadData: try JSONEncoder().encode(payload),
-        changedFieldsData: try JSONEncoder().encode(changedFields),
-        status: status
-    )
-}
+private let testFetchSourceID = "fetch:\(String(reflecting: TestTodo.self)):all"

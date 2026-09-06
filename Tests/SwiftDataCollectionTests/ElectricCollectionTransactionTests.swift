@@ -12,8 +12,8 @@ struct ElectricCollectionTransactionTests {
         async let waitForCompletion: Void = transaction.wait()
         await transaction.markSending()
         #expect(await transaction.status == .sending)
-        await transaction.markAwaitingSync()
-        #expect(await transaction.status == .awaitingSync)
+        await transaction.markAwaiting()
+        #expect(await transaction.status == .awaiting)
         await transaction.complete()
 
         try await waitForCompletion

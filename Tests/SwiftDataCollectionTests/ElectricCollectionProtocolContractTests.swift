@@ -48,7 +48,7 @@ struct ElectricCollectionProtocolContractTests {
         }
 
         let pendingBefore = try #require(context.fetch(FetchDescriptor<ElectricPendingMutation>()).first)
-        #expect(pendingBefore.status == .awaitingSync)
+        #expect(pendingBefore.status == .awaiting)
 
         let optimisticRow = try #require(context.fetch(testTodoIdentifier.fetchDescriptor(for: "todo-1")).first)
         #expect(optimisticRow.title == "Local optimistic title")
@@ -76,11 +76,11 @@ struct ElectricCollectionProtocolContractTests {
         )
 
         let pendingAfterUnrelated = try #require(context.fetch(FetchDescriptor<ElectricPendingMutation>()).first)
-        #expect(pendingAfterUnrelated.status == .awaitingSync)
+        #expect(pendingAfterUnrelated.status == .awaiting)
         let stillPendingRow = try #require(context.fetch(testTodoIdentifier.fetchDescriptor(for: "todo-1")).first)
         #expect(stillPendingRow.title == "Local optimistic title")
         switch await transaction.status {
-        case .durablyQueued, .sending, .awaitingSync:
+        case .durablyQueued, .sending, .awaiting:
             #expect(Bool(true))
         case .completed, .failed:
             Issue.record("Expected transaction to remain in progress after unrelated txid")
@@ -162,7 +162,7 @@ struct ElectricCollectionProtocolContractTests {
         )
 
         switch await transaction.status {
-        case .durablyQueued, .sending, .awaitingSync:
+        case .durablyQueued, .sending, .awaiting:
             #expect(Bool(true))
         case .completed, .failed:
             Issue.record("Expected transaction to wait for all awaited txids")

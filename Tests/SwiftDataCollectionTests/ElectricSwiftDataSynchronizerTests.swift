@@ -109,6 +109,83 @@ struct ElectricSwiftDataBatchApplicationTests {
         #expect(rows.isEmpty)
     }
 
+    @Test("Snapshot completion does not infer absence for intent captured after its row")
+    func snapshotCompletionPreservesNewlyCapturedIntent() throws {
+        let container = try makeTestContainer()
+        let context = ModelContext(container)
+        let synchronizer = ElectricCollectionSynchronizer(identifier: testTodoIdentifier)
+        let serverRow = testTodoCollectionRow(
+            id: "todo-1",
+            projectID: "project-a",
+            title: "Server"
+        )
+
+        _ = try synchronizer.apply(
+            ShapeBatch(
+                messages: [
+                    ElectricMessage(
+                        key: "\"public\".\"todos\"/todo-1",
+                        value: testTodoRow(
+                            id: "todo-1",
+                            projectID: "project-a",
+                            title: "Server"
+                        ),
+                        headers: .init(operation: .insert)
+                    ),
+                ],
+                state: testShapeState(offset: "1_0", isUpToDate: false),
+                schema: [:],
+                reachedUpToDate: false
+            ),
+            shapeID: "todos",
+            in: context
+        )
+
+        let metadata = try #require(context.fetch(FetchDescriptor<ElectricShapeMetadata>()).first)
+        #expect(try metadata.authoritativeSnapshotSeenKeys().isEmpty)
+
+        let local = try #require(context.fetch(testTodoIdentifier.fetchDescriptor(for: "todo-1")).first)
+        local.title = "Local"
+        local.collectionSyncState = .pendingUpdate
+        local.collectionPendingMutationCount = 1
+        try insertTransactionBackedMutation(
+            in: context,
+            targetKey: "todo-1",
+            payload: testTodoCollectionRow(
+                id: "todo-1",
+                projectID: "project-a",
+                title: "Local"
+            ),
+            changedFields: ["title"],
+            status: .pending,
+            baseline: serverRow
+        )
+        try context.save()
+
+        _ = try synchronizer.apply(
+            ShapeBatch(
+                messages: [.upToDate()],
+                state: testShapeState(offset: "2_0"),
+                schema: [:],
+                reachedUpToDate: true
+            ),
+            shapeID: "todos",
+            in: context
+        )
+
+        let preserved = try #require(context.fetch(testTodoIdentifier.fetchDescriptor(for: "todo-1")).first)
+        #expect(preserved.title == "Local")
+        #expect(preserved.collectionSyncState == .pendingUpdate)
+        let materializer = CollectionMaterializer(
+            context: context,
+            collectionID: "\(String(reflecting: TestTodo.self)):todos",
+            modelName: String(reflecting: TestTodo.self),
+            identifier: testTodoIdentifier,
+            rowDecoder: .init()
+        )
+        #expect(try materializer.baselineEvidence(for: "todo-1") == .observedRow(serverRow))
+    }
+
     @Test("Row applier uses CollectionSchema for inbound normalization")
     func rowApplierUsesCollectionSchemaForInboundNormalization() throws {
         let container = try makeTestContainer()
@@ -166,13 +243,13 @@ struct ElectricSwiftDataBatchApplicationTests {
             title: "Local Title"
         )
         context.insert(todo)
-        context.insert(
-            try makePendingMutation(
-                targetKey: "todo-1",
-                payload: testTodoRow(id: "todo-1", projectID: "project-a", title: "Local Title"),
-                changedFields: ["title"],
-                originalRow: testTodoRow(id: "todo-1", projectID: "project-a", title: "Server Title")
-            )
+        try insertTransactionBackedMutation(
+            in: context,
+            targetKey: "todo-1",
+            payload: testTodoCollectionRow(id: "todo-1", projectID: "project-a", title: "Local Title"),
+            changedFields: ["title"],
+            originalRow: testTodoCollectionRow(id: "todo-1", projectID: "project-a", title: "Server Title"),
+            baseline: testTodoCollectionRow(id: "todo-1", projectID: "project-a", title: "Server Title")
         )
         try context.save()
 
@@ -209,21 +286,21 @@ struct ElectricSwiftDataBatchApplicationTests {
         let synchronizer = ElectricCollectionSynchronizer(identifier: testTodoIdentifier)
 
         let todo = TestTodo(
-            collectionSyncState: .syncError,
+            collectionSyncState: .conflicted,
             collectionPendingMutationCount: 1,
             id: "todo-1",
             projectID: "project-a",
             title: "Local Title"
         )
         context.insert(todo)
-        context.insert(
-            try makePendingMutation(
-                targetKey: "todo-1",
-                payload: testTodoRow(id: "todo-1", projectID: "project-a", title: "Local Title"),
-                changedFields: ["title"],
-                originalRow: testTodoRow(id: "todo-1", projectID: "project-a", title: "Server Title"),
-                status: .conflicted
-            )
+        try insertTransactionBackedMutation(
+            in: context,
+            targetKey: "todo-1",
+            payload: testTodoCollectionRow(id: "todo-1", projectID: "project-a", title: "Local Title"),
+            changedFields: ["title"],
+            originalRow: testTodoCollectionRow(id: "todo-1", projectID: "project-a", title: "Server Title"),
+            status: .conflicted,
+            baseline: testTodoCollectionRow(id: "todo-1", projectID: "project-a", title: "Server Title")
         )
         try context.save()
 
@@ -250,31 +327,32 @@ struct ElectricSwiftDataBatchApplicationTests {
         let updated = try #require(context.fetch(testTodoIdentifier.fetchDescriptor(for: "todo-1")).first)
         #expect(updated.title == "Local Title")
         #expect(updated.projectID == "project-b")
-        #expect(updated.collectionSyncState == .syncError)
+        #expect(updated.collectionSyncState == .conflicted)
         #expect(updated.collectionPendingMutationCount == 1)
     }
 
-    @Test("Authoritative delete preserves a row with a conflicted mutation")
-    func authoritativeDeletePreservesConflictedRow() throws {
+    @Test("Authoritative delete removes a row with a conflicted update")
+    func authoritativeDeleteRemovesConflictedUpdateRow() throws {
         let container = try makeTestContainer()
         let context = ModelContext(container)
         let synchronizer = ElectricCollectionSynchronizer(identifier: testTodoIdentifier)
 
         let todo = TestTodo(
-            collectionSyncState: .syncError,
+            collectionSyncState: .conflicted,
             collectionPendingMutationCount: 1,
             id: "todo-1",
             projectID: "project-a",
             title: "Local Title"
         )
         context.insert(todo)
-        context.insert(
-            try makePendingMutation(
-                targetKey: "todo-1",
-                payload: testTodoRow(id: "todo-1", projectID: "project-a", title: "Local Title"),
-                changedFields: ["title"],
-                status: .conflicted
-            )
+        try insertTransactionBackedMutation(
+            in: context,
+            targetKey: "todo-1",
+            payload: testTodoCollectionRow(id: "todo-1", projectID: "project-a", title: "Local Title"),
+            changedFields: ["title"],
+            originalRow: testTodoCollectionRow(id: "todo-1", projectID: "project-a", title: "Server Title"),
+            status: .conflicted,
+            baseline: testTodoCollectionRow(id: "todo-1", projectID: "project-a", title: "Server Title")
         )
         try context.save()
 
@@ -294,10 +372,8 @@ struct ElectricSwiftDataBatchApplicationTests {
             in: context
         )
 
-        let preserved = try #require(context.fetch(testTodoIdentifier.fetchDescriptor(for: "todo-1")).first)
-        #expect(preserved.title == "Local Title")
-        #expect(preserved.collectionSyncState == .syncError)
-        #expect(preserved.collectionPendingMutationCount == 1)
+        let rows = try context.fetch(testTodoIdentifier.fetchDescriptor(for: "todo-1"))
+        #expect(rows.isEmpty)
     }
 
     @Test("Collection synchronizer uses CollectionSchema for inbound normalization")
@@ -533,13 +609,14 @@ struct ElectricSwiftDataBatchApplicationTests {
             title: "Local Title"
         )
         context.insert(todo)
-        context.insert(
-            try makePendingMutation(
-                targetKey: "todo-1",
-                payload: testTodoRow(id: "todo-1", projectID: "project-a", title: "Local Title"),
-                changedFields: ["title"],
-                originalRow: testTodoRow(id: "todo-1", projectID: "project-a", title: "Server Title")
-            )
+        try insertTransactionBackedMutation(
+            in: context,
+            collectionID: "TestTodo:todos",
+            targetKey: "todo-1",
+            payload: testTodoCollectionRow(id: "todo-1", projectID: "project-a", title: "Local Title"),
+            changedFields: ["title"],
+            originalRow: testTodoCollectionRow(id: "todo-1", projectID: "project-a", title: "Server Title"),
+            baseline: testTodoCollectionRow(id: "todo-1", projectID: "project-a", title: "Server Title")
         )
         try context.save()
 
@@ -592,13 +669,14 @@ struct ElectricSwiftDataBatchApplicationTests {
             title: "Local Title"
         )
         context.insert(todo)
-        context.insert(
-            try makePendingMutation(
-                targetKey: "todo-1",
-                payload: testTodoRow(id: "todo-1", projectID: "project-a", title: "Local Title"),
-                changedFields: ["title"],
-                originalRow: testTodoRow(id: "todo-1", projectID: "project-a", title: "Server Title")
-            )
+        try insertTransactionBackedMutation(
+            in: context,
+            collectionID: "TestTodo:todos",
+            targetKey: "todo-1",
+            payload: testTodoCollectionRow(id: "todo-1", projectID: "project-a", title: "Local Title"),
+            changedFields: ["title"],
+            originalRow: testTodoCollectionRow(id: "todo-1", projectID: "project-a", title: "Server Title"),
+            baseline: testTodoCollectionRow(id: "todo-1", projectID: "project-a", title: "Server Title")
         )
         try context.save()
 

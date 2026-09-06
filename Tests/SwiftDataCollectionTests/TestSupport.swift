@@ -332,26 +332,18 @@ let testEventIdentifier = CollectionModelIdentifier<TestEvent, String>.string(
 func makeTestContainer() throws -> ModelContainer {
     let configuration = ModelConfiguration(isStoredInMemoryOnly: true)
     return try ModelContainer(
-        for: TestTodo.self,
-        TestEvent.self,
-        ElectricShapeMetadata.self,
-        ElectricPendingMutation.self,
-        ElectricPendingTransaction.self,
-        ElectricCollectionMetadata.self,
-        configurations: configuration
+        for: Schema(SwiftDataCollectionSchema.models(including: [
+            TestTodo.self, TestEvent.self, ElectricShapeMetadata.self,
+        ])), configurations: configuration
     )
 }
 
 func makeTestContainer(storeURL: URL) throws -> ModelContainer {
     let configuration = ModelConfiguration(url: storeURL)
     return try ModelContainer(
-        for: TestTodo.self,
-        TestEvent.self,
-        ElectricShapeMetadata.self,
-        ElectricPendingMutation.self,
-        ElectricPendingTransaction.self,
-        ElectricCollectionMetadata.self,
-        configurations: configuration
+        for: Schema(SwiftDataCollectionSchema.models(including: [
+            TestTodo.self, TestEvent.self, ElectricShapeMetadata.self,
+        ])), configurations: configuration
     )
 }
 
@@ -473,6 +465,71 @@ func makePendingMutation(
         metadataData: try JSONEncoder().encode(metadata.mapValues { CollectionValue(electricValue: $0) }),
         status: status
     )
+}
+
+/// Inserts a transaction-first fixture for adapter reconciliation tests.
+///
+/// The materializer deliberately ignores mutations that have no owning
+/// transaction; keep the orphaned `makePendingMutation` helper for the one
+/// migration/staging test that explicitly exercises that legacy shape, and
+/// use this helper for normal pending outbox fixtures.
+@discardableResult
+func insertTransactionBackedMutation(
+    in context: ModelContext,
+    id: UUID = UUID(),
+    collectionID: String? = nil,
+    shapeID: String = "todos",
+    targetKey: String = "1",
+    operation: CollectionMutationOperation = .update,
+    payload: CollectionRow,
+    changedFields: Set<String> = [],
+    originalRow: CollectionRow? = nil,
+    status: PendingMutationStatus = .pending,
+    sequenceNumber: Int = 0,
+    createdAt: Date = Date(),
+    metadata: [String: CollectionValue] = [:],
+    baseline: CollectionRow? = nil
+) throws -> PendingCollectionMutation {
+    let modelName = String(reflecting: TestTodo.self)
+    let resolvedCollectionID = collectionID ?? "\(modelName):\(shapeID)"
+    let transactionID = id
+    let transaction = PendingCollectionTransaction(
+        id: transactionID,
+        collectionID: resolvedCollectionID,
+        shapeID: shapeID,
+        modelName: modelName,
+        sequenceNumber: sequenceNumber,
+        status: PendingTransactionState(rawValue: status.rawValue) ?? .pending,
+        createdAt: createdAt,
+        updatedAt: createdAt
+    )
+    let mutation = PendingCollectionMutation(
+        id: id,
+        transactionID: transactionID,
+        modelName: modelName,
+        shapeID: shapeID,
+        targetKey: targetKey,
+        operation: operation,
+        payloadData: try JSONEncoder().encode(payload),
+        changedFieldsData: try JSONEncoder().encode(changedFields),
+        originalRowData: try originalRow.map { try JSONEncoder().encode($0) },
+        metadataData: try JSONEncoder().encode(metadata),
+        status: status,
+        createdAt: createdAt
+    )
+    if let baseline {
+        context.insert(
+            try CollectionAuthoritativeBase(
+                collectionID: resolvedCollectionID,
+                modelName: modelName,
+                targetKey: targetKey,
+                evidence: .observedRow(baseline)
+            )
+        )
+    }
+    context.insert(transaction)
+    context.insert(mutation)
+    return mutation
 }
 
 final class MockURLProtocol: URLProtocol, @unchecked Sendable {

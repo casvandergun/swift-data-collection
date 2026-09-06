@@ -28,10 +28,24 @@ public enum CollectionLifecycleState: Sendable, Hashable, Codable {
 public enum PendingTransactionState: String, Sendable, Hashable, Codable {
     case pending
     case sending
-    case awaitingSync
+    case awaiting
     case resolved
     case failed
     case conflicted
+    case discarded
+
+    package var requiresResolution: Bool {
+        switch self {
+        case .pending, .sending, .awaiting, .failed, .conflicted:
+            true
+        case .resolved, .discarded:
+            false
+        }
+    }
+
+    package var blocksSuccessorDispatch: Bool {
+        requiresResolution
+    }
 }
 
 @Model
@@ -49,6 +63,9 @@ public final class PendingCollectionTransaction {
     public var lastAttemptAt: Date?
     public var nextRetryAt: Date?
     public var lastErrorMessage: String?
+    package var dispatchGroupID: UUID? = nil
+    package var submittedMutationsData: Data? = nil
+    package var conflictOccurredAt: Date? = nil
 
     public init(
         id: UUID = UUID(),
@@ -141,6 +158,7 @@ public final class CollectionMetadata {
     public var lastErrorMessage: String?
     public var lastReplayAt: Date?
     public var lastSyncedAt: Date?
+    package var nextTransactionSequence: Int = 0
 
     public init(
         collectionID: String,
@@ -195,7 +213,7 @@ package func defaultCollectionRetrySleep(_ delay: TimeInterval) async {
 
 enum CollectionMutationDispatcher {
     static func groups(from mutations: [PendingCollectionMutation]) -> [[PendingCollectionMutation]] {
-        let sorted = mutations.sorted { $0.createdAt < $1.createdAt }
+        let sorted = mutations.sorted(by: mutationIsEarlier)
         var groups: [[PendingCollectionMutation]] = []
         for mutation in sorted {
             if var last = groups.popLast(), last.first?.operation == mutation.operation {
@@ -206,6 +224,32 @@ enum CollectionMutationDispatcher {
             }
         }
         return groups
+    }
+
+    static func groups(from mutations: [CollectionMutation]) -> [[CollectionMutation]] {
+        var groups: [[CollectionMutation]] = []
+        for mutation in mutations {
+            if var last = groups.popLast(), last.first?.operation == mutation.operation {
+                last.append(mutation)
+                groups.append(last)
+            } else {
+                groups.append([mutation])
+            }
+        }
+        return groups
+    }
+
+    private static func mutationIsEarlier(
+        _ lhs: PendingCollectionMutation,
+        _ rhs: PendingCollectionMutation
+    ) -> Bool {
+        if lhs.ordinal != rhs.ordinal {
+            return lhs.ordinal < rhs.ordinal
+        }
+        if lhs.createdAt != rhs.createdAt {
+            return lhs.createdAt < rhs.createdAt
+        }
+        return lhs.id.uuidString < rhs.id.uuidString
     }
 }
 
@@ -237,6 +281,9 @@ struct CollectionMutationQueue {
             .filter { $0.collectionID == collectionID }
             .sorted { lhs, rhs in
                 if lhs.sequenceNumber == rhs.sequenceNumber {
+                    if lhs.createdAt == rhs.createdAt {
+                        return lhs.id.uuidString < rhs.id.uuidString
+                    }
                     return lhs.createdAt < rhs.createdAt
                 }
                 return lhs.sequenceNumber < rhs.sequenceNumber
@@ -246,14 +293,14 @@ struct CollectionMutationQueue {
     func fetchPendingMutations(transactionID: UUID) -> [PendingCollectionMutation] {
         ((try? context.fetch(FetchDescriptor<PendingCollectionMutation>())) ?? [])
             .filter { $0.transactionID == transactionID }
-            .sorted { $0.createdAt < $1.createdAt }
+            .sorted(by: Self.mutationIsEarlier)
     }
 
     func fetchAllPendingMutations(collectionID: String) -> [PendingCollectionMutation] {
         let transactionIDs = Set(fetchAllPendingTransactions(collectionID: collectionID).map(\.id))
         return ((try? context.fetch(FetchDescriptor<PendingCollectionMutation>())) ?? [])
             .filter { transactionIDs.contains($0.transactionID) }
-            .sorted { $0.createdAt < $1.createdAt }
+            .sorted(by: Self.mutationIsEarlier)
     }
 
     func eligibleDispatchTransactionIDs(collectionID: String, now: Date) -> [UUID] {
@@ -261,6 +308,9 @@ struct CollectionMutationQueue {
             .filter { transaction in
                 transaction.status == .pending ||
                 transaction.status == .failed && (transaction.nextRetryAt == nil || transaction.nextRetryAt! <= now)
+            }
+            .filter { transaction in
+                transaction.dispatchGroupID == nil || transaction.dispatchGroupID == transaction.id
             }
             .filter { transaction in
                 hasUnresolvedPredecessor(for: transaction, collectionID: collectionID) == false
@@ -281,10 +331,6 @@ struct CollectionMutationQueue {
             .min()
     }
 
-    func nextTransactionSequenceNumber(collectionID: String) -> Int {
-        (fetchAllPendingTransactions(collectionID: collectionID).map(\.sequenceNumber).max() ?? 0) + 1
-    }
-
     func hasUnresolvedPredecessor(
         for transaction: PendingCollectionTransaction,
         collectionID: String
@@ -294,7 +340,7 @@ struct CollectionMutationQueue {
 
         return fetchAllPendingTransactions(collectionID: collectionID)
             .filter { isEarlier($0, than: transaction) }
-            .filter(Self.isUnresolved)
+            .filter { $0.status.blocksSuccessorDispatch }
             .contains { earlier in
                 let earlierKeys = Set(fetchPendingMutations(transactionID: earlier.id).map(\.targetKey))
                 return earlierKeys.isDisjoint(with: currentKeys) == false
@@ -312,19 +358,26 @@ struct CollectionMutationQueue {
 
         for successor in fetchAllPendingTransactions(collectionID: collectionID)
             .filter({ isEarlier(transaction, than: $0) }) {
-            guard successor.status == .pending ||
-                  successor.status == .failed && (successor.nextRetryAt == nil || successor.nextRetryAt! <= now) else {
-                continue
-            }
-
             let mutations = fetchPendingMutations(transactionID: successor.id)
             guard mutations.contains(where: { $0.targetKey == targetKey }) else {
                 continue
             }
 
+            guard successor.status == .pending ||
+                  successor.status == .failed && (successor.nextRetryAt == nil || successor.nextRetryAt! <= now) else {
+                break
+            }
+
+            guard successor.dispatchGroupID == nil,
+                  successor.submittedMutationsData == nil,
+                  successor.attemptCount == 0 else {
+                break
+            }
+
             guard mutations.count == 1,
                   let mutation = mutations.first,
                   mutation.operation == operation,
+                  mutation.attemptCount == 0,
                   mutation.status == .pending ||
                   mutation.status == .failed && (mutation.nextRetryAt == nil || mutation.nextRetryAt! <= now) else {
                 break
@@ -335,23 +388,30 @@ struct CollectionMutationQueue {
         return compactable
     }
 
-    private static func isUnresolved(_ transaction: PendingCollectionTransaction) -> Bool {
-        switch transaction.status {
-        case .pending, .sending, .awaitingSync, .failed:
-            true
-        case .resolved, .conflicted:
-            false
-        }
-    }
-
     private func isEarlier(
         _ lhs: PendingCollectionTransaction,
         than rhs: PendingCollectionTransaction
     ) -> Bool {
         if lhs.sequenceNumber == rhs.sequenceNumber {
+            if lhs.createdAt == rhs.createdAt {
+                return lhs.id.uuidString < rhs.id.uuidString
+            }
             return lhs.createdAt < rhs.createdAt
         }
         return lhs.sequenceNumber < rhs.sequenceNumber
+    }
+
+    private static func mutationIsEarlier(
+        _ lhs: PendingCollectionMutation,
+        _ rhs: PendingCollectionMutation
+    ) -> Bool {
+        if lhs.ordinal != rhs.ordinal {
+            return lhs.ordinal < rhs.ordinal
+        }
+        if lhs.createdAt != rhs.createdAt {
+            return lhs.createdAt < rhs.createdAt
+        }
+        return lhs.id.uuidString < rhs.id.uuidString
     }
 
     func fetchOrCreateCollectionMetadata(
@@ -383,61 +443,94 @@ struct CollectionMutationReconciler {
         observedTokens: Set<String>,
         collectionID: String,
         remainingTokensByTransactionID: inout [UUID: Set<String>],
-        awaitedTransactionIDsByToken: inout [String: Set<UUID>]
-    ) -> [UUID] {
+        awaitedTransactionIDsByToken: inout [String: Set<UUID>],
+        materialize: ((ModelContext, Set<String>) throws -> Void)? = nil
+    ) throws -> [UUID] {
         guard observedTokens.isEmpty == false else { return [] }
         let context = ModelContext(modelContainer)
         var completedTransactionIDs: [UUID] = []
+        var updatedRemaining = remainingTokensByTransactionID
+        var updatedAwaited = awaitedTransactionIDsByToken
 
         for token in observedTokens {
-            let affectedTransactions = awaitedTransactionIDsByToken[token] ?? []
+            let affectedTransactions = updatedAwaited[token] ?? []
             for transactionID in affectedTransactions {
-                guard var remaining = remainingTokensByTransactionID[transactionID] else { continue }
+                guard var remaining = updatedRemaining[transactionID] else { continue }
                 remaining.remove(token)
                 if remaining.isEmpty {
-                    remainingTokensByTransactionID.removeValue(forKey: transactionID)
-                    markTransactionResolved(id: transactionID, collectionID: collectionID, in: context)
-                    completedTransactionIDs.append(transactionID)
+                    if try markTransactionResolved(id: transactionID, collectionID: collectionID, in: context) {
+                        updatedRemaining.removeValue(forKey: transactionID)
+                        completedTransactionIDs.append(transactionID)
+                    } else {
+                        updatedRemaining[transactionID] = []
+                    }
                 } else {
-                    remainingTokensByTransactionID[transactionID] = remaining
+                    updatedRemaining[transactionID] = remaining
                 }
             }
 
             for transactionID in affectedTransactions {
-                awaitedTransactionIDsByToken[token]?.remove(transactionID)
+                updatedAwaited[token]?.remove(transactionID)
             }
-            if awaitedTransactionIDsByToken[token]?.isEmpty == true {
-                awaitedTransactionIDsByToken.removeValue(forKey: token)
+            if updatedAwaited[token]?.isEmpty == true {
+                updatedAwaited.removeValue(forKey: token)
             }
         }
 
-        try? context.save()
+        // Evidence may arrive after its token. Recheck token-complete waiters on
+        // every applied batch without speculatively resolving their overlays.
+        for transactionID in updatedRemaining.filter({ $0.value.isEmpty }).map(\.key) {
+            if try markTransactionResolved(id: transactionID, collectionID: collectionID, in: context) {
+                updatedRemaining.removeValue(forKey: transactionID)
+                completedTransactionIDs.append(transactionID)
+            }
+        }
+
+        if let materialize, completedTransactionIDs.isEmpty == false {
+            let mutations = try context.fetch(FetchDescriptor<PendingCollectionMutation>())
+                .filter { completedTransactionIDs.contains($0.transactionID) }
+            try materialize(context, Set(mutations.map(\.targetKey)))
+        }
+        try context.save()
+        remainingTokensByTransactionID = updatedRemaining
+        awaitedTransactionIDsByToken = updatedAwaited
         return completedTransactionIDs
     }
 
     func resolveTransaction(
         id: UUID,
-        collectionID: String
-    ) {
+        collectionID: String,
+        materialize: ((ModelContext, Set<String>) throws -> Void)? = nil
+    ) throws -> Bool {
         let context = ModelContext(modelContainer)
-        markTransactionResolved(id: id, collectionID: collectionID, in: context)
-        try? context.save()
+        let resolved = try markTransactionResolved(id: id, collectionID: collectionID, in: context)
+        if resolved, let materialize {
+            let mutations = try context.fetch(FetchDescriptor<PendingCollectionMutation>())
+                .filter { $0.transactionID == id }
+            try materialize(context, Set(mutations.map(\.targetKey)))
+        }
+        try context.save()
+        return resolved
     }
 
-    private func markTransactionResolved(id: UUID, collectionID: String, in context: ModelContext) {
-        let transactions = ((try? context.fetch(FetchDescriptor<PendingCollectionTransaction>())) ?? [])
+    private func markTransactionResolved(
+        id: UUID,
+        collectionID: String,
+        in context: ModelContext
+    ) throws -> Bool {
+        let mutations = try context.fetch(FetchDescriptor<PendingCollectionMutation>())
+            .filter { $0.transactionID == id }
+        guard mutations.isEmpty == false,
+              mutations.allSatisfy({ $0.status == .resolved }) else {
+            return false
+        }
+        let transactions = try context.fetch(FetchDescriptor<PendingCollectionTransaction>())
             .filter { $0.collectionID == collectionID && $0.id == id }
         for transaction in transactions {
             transaction.status = .resolved
             transaction.lastErrorMessage = nil
         }
-
-        let mutations = ((try? context.fetch(FetchDescriptor<PendingCollectionMutation>())) ?? [])
-            .filter { $0.transactionID == id }
-        for mutation in mutations {
-            mutation.status = .resolved
-            mutation.errorMessage = nil
-        }
+        return transactions.isEmpty == false
     }
 
     static func unresolvedMutations(
@@ -448,7 +541,15 @@ struct CollectionMutationReconciler {
         ((try? context.fetch(FetchDescriptor<PendingCollectionMutation>())) ?? [])
             .filter { $0.modelName == modelName && $0.targetKey == targetKey }
             .filter { $0.status.participatesInReconciliationOverlay }
-            .sorted { $0.createdAt < $1.createdAt }
+            .sorted { lhs, rhs in
+                if lhs.ordinal != rhs.ordinal {
+                    return lhs.ordinal < rhs.ordinal
+                }
+                if lhs.createdAt != rhs.createdAt {
+                    return lhs.createdAt < rhs.createdAt
+                }
+                return lhs.id.uuidString < rhs.id.uuidString
+            }
     }
 
     static func refreshModelState<Model: SwiftDataCollectionModel, ID: Hashable & Sendable>(
@@ -468,8 +569,10 @@ struct CollectionMutationReconciler {
             if existing.collectionSyncState != .stagedCreate {
                 existing.collectionSyncState = .synced
             }
-        } else if pending.contains(where: { $0.status.requiresSyncErrorState }) {
-            existing.collectionSyncState = .syncError
+        } else if pending.contains(where: { $0.status == .conflicted }) {
+            existing.collectionSyncState = .conflicted
+        } else if pending.contains(where: { $0.status == .failed }) {
+            existing.collectionSyncState = .error
         } else if pending.contains(where: { $0.operation == .delete }) {
             existing.collectionSyncState = .pendingDelete
         } else if pending.contains(where: { $0.operation == .create }) {
@@ -539,10 +642,10 @@ struct PreparedCollectionTransaction {
     }
 
     func persistedMutations() throws -> [PendingCollectionMutation] {
-        try mutations.map { mutation in
+        try mutations.enumerated().map { ordinal, mutation in
             let changedFields = Set(mutation.changes.keys)
             let payload = mutation.modified ?? [:]
-            return PendingCollectionMutation(
+            let persisted = PendingCollectionMutation(
                 transactionID: transactionID,
                 modelName: modelName,
                 shapeID: shapeID,
@@ -554,6 +657,8 @@ struct PreparedCollectionTransaction {
                 metadataData: try JSONEncoder().encode(mutation.metadata),
                 status: .pending
             )
+            persisted.ordinal = ordinal
+            return persisted
         }
     }
 }
@@ -885,6 +990,7 @@ public enum CollectionError: Error, Sendable {
     case invalidStagedTransition(key: String, state: CollectionSyncState)
     case stagedOperationHasPendingMutations(key: String, count: Int)
     case stableIdentifierChanged(expected: String, actual: String)
+    case transactionSequenceOverflow
 }
 
 public struct CollectionNonRetriableError: Error, Sendable, CustomStringConvertible {

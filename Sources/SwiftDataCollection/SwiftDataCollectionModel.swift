@@ -305,7 +305,8 @@ public enum CollectionSyncState: String, Sendable, Codable, Hashable {
     case pendingCreate
     case pendingUpdate
     case pendingDelete
-    case syncError
+    /// Retryable write failure.
+    case error
     case conflicted
 }
 

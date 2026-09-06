@@ -8,6 +8,10 @@ public final class ElectricShapeMetadata {
     public var offset: String
     public var cursor: String?
     public var lastSyncedAt: Date?
+    /// Persisted so a reset snapshot can span multiple batches and process restarts
+    /// without turning a row that appeared in an earlier batch into an absence.
+    package var authoritativeSnapshotInProgress: Bool
+    package var authoritativeSnapshotSeenKeysData: Data?
 
     public init(
         shapeID: String,
@@ -21,6 +25,8 @@ public final class ElectricShapeMetadata {
         self.offset = offset
         self.cursor = cursor
         self.lastSyncedAt = lastSyncedAt
+        self.authoritativeSnapshotInProgress = true
+        self.authoritativeSnapshotSeenKeysData = nil
     }
 
     public func apply(checkpoint: ElectricShapeCheckpoint) {
@@ -37,6 +43,28 @@ public final class ElectricShapeMetadata {
             cursor: cursor,
             lastSyncedAt: lastSyncedAt
         )
+    }
+
+    package func beginAuthoritativeSnapshot() {
+        authoritativeSnapshotInProgress = true
+        authoritativeSnapshotSeenKeysData = nil
+    }
+
+    package func recordAuthoritativeSnapshotKey(_ key: String) throws {
+        guard authoritativeSnapshotInProgress else { return }
+        var keys = try authoritativeSnapshotSeenKeys()
+        keys.insert(key)
+        authoritativeSnapshotSeenKeysData = try JSONEncoder().encode(keys)
+    }
+
+    package func authoritativeSnapshotSeenKeys() throws -> Set<String> {
+        guard let authoritativeSnapshotSeenKeysData else { return [] }
+        return try JSONDecoder().decode(Set<String>.self, from: authoritativeSnapshotSeenKeysData)
+    }
+
+    package func finishAuthoritativeSnapshot() {
+        authoritativeSnapshotInProgress = false
+        authoritativeSnapshotSeenKeysData = nil
     }
 
     @Transient

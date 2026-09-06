@@ -145,7 +145,7 @@ struct ElectricCollectionRestartTests {
 
         let reopenedContext = ModelContext(reopenedContainer)
         let replayed = try #require(reopenedContext.fetch(FetchDescriptor<ElectricPendingTransaction>()).first)
-        #expect(replayed.status == .awaitingSync)
+        #expect(replayed.status == .awaiting)
     }
 
     @Test("Replay tracing records reset dispatch and awaited txids after restart")
@@ -225,8 +225,8 @@ struct ElectricCollectionRestartTests {
         #expect(registered.metadata["awaitedTXIDs"] == "111")
     }
 
-    @Test("Persisted awaiting-sync transaction re-registers txids without duplicate dispatch")
-    func awaitingSyncTransactionDoesNotRedispatchAfterRestart() async throws {
+    @Test("Persisted awaiting transaction re-registers txids without duplicate dispatch")
+    func awaitingTransactionDoesNotRedispatchAfterRestart() async throws {
         let storeLocation = TestStoreLocation()
         defer { storeLocation.cleanup() }
 
@@ -267,7 +267,7 @@ struct ElectricCollectionRestartTests {
 
         let reopenedContext = ModelContext(reopenedContainer)
         let awaiting = try #require(reopenedContext.fetch(FetchDescriptor<ElectricPendingTransaction>()).first)
-        #expect(awaiting.status == .awaitingSync)
+        #expect(awaiting.status == .awaiting)
 
         let batch = testTodoBatch(
             messages: [
@@ -341,7 +341,7 @@ struct ElectricCollectionRestartTests {
 
         let reopenedContext = ModelContext(reopenedContainer)
         let row = try #require(reopenedContext.fetch(testTodoIdentifier.fetchDescriptor(for: "todo-1")).first)
-        #expect(row.collectionSyncState == .syncError)
+        #expect(row.collectionSyncState == .error)
         #expect(row.collectionPendingMutationCount == 1)
 
         let pending = try #require(reopenedContext.fetch(FetchDescriptor<ElectricPendingMutation>()).first)
@@ -409,7 +409,7 @@ struct ElectricCollectionRestartTests {
 
         let reopenedContext = ModelContext(reopenedContainer)
         let retried = try #require(reopenedContext.fetch(FetchDescriptor<ElectricPendingTransaction>()).first)
-        #expect(retried.status == .awaitingSync)
+        #expect(retried.status == .awaiting)
     }
 
     @Test("Multiple persisted transactions replay in FIFO order after restart")

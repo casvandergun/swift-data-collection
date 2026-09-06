@@ -65,8 +65,23 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
         var updatedCount = 0
         var deletedCount = 0
         var stagedEvents: [StagedEvent] = []
+        let resolvedCollectionID = collectionID ?? "\(modelName):\(shapeID)"
+        let materializer = CollectionMaterializer(
+            context: context,
+            collectionID: resolvedCollectionID,
+            modelName: modelName,
+            identifier: identifier,
+            rowDecoder: rowDecoder
+        )
+        let metadata = try fetchMetadata(shapeID: shapeID, in: context)
+            ?? ElectricShapeMetadata(shapeID: shapeID)
+        if metadata.modelContext == nil {
+            context.insert(metadata)
+        }
 
         if batch.messages.contains(where: { $0.headers.control == .mustRefetch }) {
+            try materializer.invalidateAllBaselines()
+            metadata.beginAuthoritativeSnapshot()
             let refetch = try deleteRefetchableModels(in: context)
             deletedCount += refetch.deletedCount
             stagedEvents.append(contentsOf: refetch.preservedStagedKeys.map { key in
@@ -101,7 +116,11 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
             let txids = message.headers.txids ?? []
             switch operation {
             case .insert, .update:
-                guard let key, let row = message.value else {
+                guard let key else {
+                    logSkip(message, shapeID: shapeID, offset: batch.state.offset, reason: "missing key or value")
+                    continue
+                }
+                guard let row = message.value else {
                     logSkip(message, shapeID: shapeID, offset: batch.state.offset, reason: "missing key or value")
                     continue
                 }
@@ -114,8 +133,15 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
                     shapeID: shapeID,
                     batchState: batch.state,
                     stagedEvents: &stagedEvents,
+                    materializer: materializer,
                     in: context
                 )
+                // Snapshot bookkeeping is limited to dirty keys. Clean rows do
+                // not retain a base and must not turn this metadata into a
+                // second copy of the shape.
+                if try materializer.baselineEvidence(for: key) != nil {
+                    try metadata.recordAuthoritativeSnapshotKey(key)
+                }
                 resolvedTransactionIDs.formUnion(outcome.resolvedTransactionIDs)
                 switch outcome.change {
                 case .inserted:
@@ -137,8 +163,12 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
                     shapeID: shapeID,
                     offset: batch.state.offset,
                     stagedEvents: &stagedEvents,
+                    materializer: materializer,
                     in: context
                 )
+                if try materializer.baselineEvidence(for: key) != nil {
+                    try metadata.recordAuthoritativeSnapshotKey(key)
+                }
                 resolvedTransactionIDs.formUnion(outcome.resolvedTransactionIDs)
                 if outcome.deleted {
                     deletedCount += 1
@@ -146,10 +176,25 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
             }
         }
 
-        let metadata = try fetchMetadata(shapeID: shapeID, in: context)
-            ?? ElectricShapeMetadata(shapeID: shapeID)
-        if metadata.modelContext == nil {
-            context.insert(metadata)
+        if batch.boundaryKind == .upToDate, metadata.authoritativeSnapshotInProgress {
+            let unseenKeys = try materializer.baselineKeys()
+                .subtracting(metadata.authoritativeSnapshotSeenKeys())
+            // Only bases invalidated by this snapshot are candidates for
+            // inferred absence. A mutation captured after its row appeared in
+            // the snapshot has observed evidence even though its key was not
+            // in the reset's dirty-key set.
+            let missingKeys = try unseenKeys.filter {
+                try materializer.baselineEvidence(for: $0) == .unknown
+            }
+            for key in missingKeys {
+                let existed = try fetchModel(key: key, in: context) != nil
+                try materializer.apply(.absence, for: key)
+                try materializer.materialize(key: key)
+                if existed, try fetchModel(key: key, in: context) == nil {
+                    deletedCount += 1
+                }
+            }
+            metadata.finishAuthoritativeSnapshot()
         }
         metadata.apply(checkpoint: batch.checkpoint)
         logApply(
@@ -219,14 +264,9 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
         shapeID: String,
         batchState: ShapeStreamState,
         stagedEvents: inout [StagedEvent],
+        materializer: CollectionMaterializer<Model, ID>,
         in context: ModelContext
     ) throws -> UpsertOutcome {
-        let resolvedTransactionIDs = resolveAwaitingMutations(
-            modelName: modelName,
-            targetKey: key,
-            txids: txids,
-            in: context
-        )
         let pending = unresolvedMutations(modelName: modelName, targetKey: key, in: context)
         let collectionRow = CollectionRow(
             electricRow: row,
@@ -267,208 +307,88 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
                         outcome: "resolved"
                     )
                 )
-                return UpsertOutcome(resolvedTransactionIDs: resolvedTransactionIDs, change: .updated)
+                return UpsertOutcome(resolvedTransactionIDs: [], change: .updated)
             }
         }
 
-        if pending.contains(where: { $0.operation == .delete }) {
-            logApply(
-                "skipped upsert because local delete is pending",
-                metadata: messageMetadata(
-                    message,
-                    shapeID: shapeID,
-                    offset: batchState.offset,
-                    extra: [
-                        "modelName": modelName,
-                        "collectionID": collectionID ?? "",
-                        "key": key,
-                        "pendingMutationCount": String(pending.count),
-                        "outcome": "pendingDelete",
-                    ]
-                )
-            )
-            return UpsertOutcome(resolvedTransactionIDs: resolvedTransactionIDs, change: .none)
-        }
-
-        let protectedFields = Set(
-            pending
-                .filter { $0.operation != .delete }
-                .flatMap(\.changedFields)
+        let localRowBefore = try fetchModel(key: key, in: context)?.collectionRow()
+        let appliedEvidence = try materializer.apply(
+            operation == .insert ? .replacement(collectionRow) : .patch(collectionRow),
+            for: key
         )
-
-        if let existing = try fetchModel(key: key, in: context) {
-            let localRow = try existing.collectionRow()
-            if pending.isEmpty {
-                let appliedRow = if operation == .update {
-                    CollectionRowPatcher.applying(patch: collectionRow, to: localRow)
-                } else {
-                    collectionRow
-                }
-                try existing.apply(collectionRow: appliedRow, decoder: rowDecoder)
-                existing.collectionPendingMutationCount = 0
-                existing.collectionSyncState = .synced
-                logApply(
-                    operation == .update ? "merged patch into existing model" : "updated existing model",
-                    metadata: messageMetadata(
-                        message,
-                        shapeID: shapeID,
-                        offset: batchState.offset,
-                        extra: [
-                            "modelName": modelName,
-                            "collectionID": collectionID ?? "",
-                            "key": key,
-                            "outcome": operation == .update ? "mergedPatch" : "updated",
-                        ]
-                    )
-                )
-                traceServerApply(
-                    message: operation == .update ? "merged patch into existing model" : "updated existing model",
-                    shapeID: shapeID,
-                    key: key,
-                    operation: operation,
-                    txids: txids,
-                    offset: batchState.offset,
-                    resolvedTransactionIDs: resolvedTransactionIDs,
-                    metadata: [
-                        "inboundRow": debugString(collectionRow),
-                        "localRowBefore": debugString(localRow),
-                        "appliedRow": debugString(appliedRow),
-                        "changedFields": changedFields(for: collectionRow),
-                        "outcome": operation == .update ? "mergedPatch" : "updated",
-                        "finalSyncState": String(describing: existing.collectionSyncState),
-                        "finalPendingMutationCount": String(existing.collectionPendingMutationCount),
-                    ]
-                )
-            } else {
-                let mergedRow = CollectionRowPatcher.applying(
-                    patch: collectionRow,
-                    to: localRow,
-                    preserving: protectedFields
-                )
-                try existing.apply(collectionRow: mergedRow, decoder: rowDecoder)
-                applyPendingSummary(pending, to: existing)
-                logApply(
-                    "merged server row into pending local model",
-                    metadata: messageMetadata(
-                        message,
-                        shapeID: shapeID,
-                        offset: batchState.offset,
-                        extra: [
-                            "modelName": modelName,
-                            "collectionID": collectionID ?? "",
-                            "key": key,
-                            "pendingMutationCount": String(pending.count),
-                            "protectedFields": protectedFields.sorted().joined(separator: ","),
-                            "outcome": "mergedPending",
-                        ]
-                    )
-                )
-                traceServerApply(
-                    message: "merged server row into pending local model",
-                    shapeID: shapeID,
-                    key: key,
-                    operation: operation,
-                    txids: txids,
-                    offset: batchState.offset,
-                    resolvedTransactionIDs: resolvedTransactionIDs,
-                    metadata: [
-                        "inboundRow": debugString(collectionRow),
-                        "localRowBefore": debugString(localRow),
-                        "appliedRow": debugString(mergedRow),
-                        "changedFields": changedFields(for: collectionRow),
-                        "pendingMutationCount": String(pending.count),
-                        "protectedFields": protectedFields.sorted().joined(separator: ","),
-                        "outcome": "mergedPending",
-                        "finalSyncState": String(describing: existing.collectionSyncState),
-                        "finalPendingMutationCount": String(existing.collectionPendingMutationCount),
-                    ]
-                )
-            }
-            return UpsertOutcome(resolvedTransactionIDs: resolvedTransactionIDs, change: .updated)
+        // Materialize while the optimistic overlay is still present. This
+        // keeps the visible row coherent if acknowledgement resolution fails
+        // later in the batch. A partial update over unknown/absent evidence is
+        // intentionally not enough to acknowledge a token.
+        try materializer.materialize(key: key)
+        let resolvedTransactionIDs = appliedEvidence
+            ? resolveAwaitingMutations(
+                modelName: modelName,
+                targetKey: key,
+                txids: txids,
+                allowedOperations: [.create, .update],
+                in: context
+            )
+            : []
+        if resolvedTransactionIDs.isEmpty == false {
+            // Removing an acknowledged overlay changes the logical row. The
+            // second materialization is still part of the caller's single
+            // context save, so base, row, and outbox state commit together.
+            try materializer.materialize(key: key)
         }
-
-        let merged = pending.isEmpty
-            ? collectionRow
-            : CollectionRowPatcher.applying(
-                patch: collectionRow,
-                to: [:],
-                preserving: protectedFields
-            )
-        let model = try Model(collectionRow: merged, decoder: rowDecoder)
-        if pending.isEmpty {
-            model.collectionPendingMutationCount = 0
-            model.collectionSyncState = .synced
-            logApply(
-                "inserted new model",
-                metadata: messageMetadata(
-                    message,
-                    shapeID: shapeID,
-                    offset: batchState.offset,
-                    extra: [
-                        "modelName": modelName,
-                        "collectionID": collectionID ?? "",
-                        "key": key,
-                        "outcome": "inserted",
-                    ]
-                )
-            )
-            traceServerApply(
-                message: "inserted new model",
+        let appliedModel = try fetchModel(key: key, in: context)
+        let appliedRow = try appliedModel?.collectionRow()
+        let protectedFields = Set(pending.filter { $0.operation != .delete }.flatMap(\.changedFields))
+        let outcome = pending.isEmpty
+            ? (operation == .update ? "mergedPatch" : (localRowBefore == nil ? "inserted" : "updated"))
+            : (pending.contains { $0.operation == .delete } ? "pendingDelete" : "mergedPending")
+        let logMessage = pending.isEmpty
+            ? (operation == .update ? "merged patch into existing model" : (localRowBefore == nil ? "inserted new model" : "updated existing model"))
+            : "merged server row into pending local model"
+        logApply(
+            logMessage,
+            metadata: messageMetadata(
+                message,
                 shapeID: shapeID,
-                key: key,
-                operation: operation,
-                txids: txids,
                 offset: batchState.offset,
-                resolvedTransactionIDs: resolvedTransactionIDs,
-                metadata: [
-                    "inboundRow": debugString(collectionRow),
-                    "appliedRow": debugString(merged),
-                    "changedFields": changedFields(for: collectionRow),
-                    "outcome": "inserted",
-                    "finalSyncState": String(describing: model.collectionSyncState),
-                    "finalPendingMutationCount": String(model.collectionPendingMutationCount),
-                ]
-            )
-        } else {
-            applyPendingSummary(pending, to: model)
-            logApply(
-                "inserted model while preserving pending local fields",
-                metadata: messageMetadata(
-                    message,
-                    shapeID: shapeID,
-                    offset: batchState.offset,
-                    extra: [
-                        "modelName": modelName,
-                        "collectionID": collectionID ?? "",
-                        "key": key,
-                        "pendingMutationCount": String(pending.count),
-                        "protectedFields": protectedFields.sorted().joined(separator: ","),
-                        "outcome": "insertedPending",
-                    ]
-                )
-            )
-            traceServerApply(
-                message: "inserted model while preserving pending local fields",
-                shapeID: shapeID,
-                key: key,
-                operation: operation,
-                txids: txids,
-                offset: batchState.offset,
-                resolvedTransactionIDs: resolvedTransactionIDs,
-                metadata: [
-                    "inboundRow": debugString(collectionRow),
-                    "appliedRow": debugString(merged),
-                    "changedFields": changedFields(for: collectionRow),
+                extra: [
+                    "modelName": modelName,
+                    "collectionID": collectionID ?? "",
+                    "key": key,
                     "pendingMutationCount": String(pending.count),
                     "protectedFields": protectedFields.sorted().joined(separator: ","),
-                    "outcome": "insertedPending",
-                    "finalSyncState": String(describing: model.collectionSyncState),
-                    "finalPendingMutationCount": String(model.collectionPendingMutationCount),
+                    "outcome": outcome,
                 ]
             )
+        )
+        traceServerApply(
+            message: logMessage,
+            shapeID: shapeID,
+            key: key,
+            operation: operation,
+            txids: txids,
+            offset: batchState.offset,
+            resolvedTransactionIDs: resolvedTransactionIDs,
+            metadata: [
+                "inboundRow": debugString(collectionRow),
+                "localRowBefore": localRowBefore.map(debugString) ?? "nil",
+                "appliedRow": appliedRow.map(debugString) ?? "nil",
+                "changedFields": changedFields(for: collectionRow),
+                "pendingMutationCount": String(pending.count),
+                "protectedFields": protectedFields.sorted().joined(separator: ","),
+                "outcome": outcome,
+                "finalSyncState": appliedModel.map { String(describing: $0.collectionSyncState) } ?? "absent",
+                "finalPendingMutationCount": appliedModel.map { String($0.collectionPendingMutationCount) } ?? "0",
+            ]
+        )
+        let change: UpsertChange = if localRowBefore == nil && appliedRow != nil {
+            .inserted
+        } else if appliedRow != nil {
+            .updated
+        } else {
+            .none
         }
-        context.insert(model)
-        return UpsertOutcome(resolvedTransactionIDs: resolvedTransactionIDs, change: .inserted)
+        return UpsertOutcome(resolvedTransactionIDs: resolvedTransactionIDs, change: change)
     }
 
     private func applyDelete(
@@ -478,14 +398,9 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
         shapeID: String,
         offset: String,
         stagedEvents: inout [StagedEvent],
+        materializer: CollectionMaterializer<Model, ID>,
         in context: ModelContext
     ) throws -> DeleteOutcome {
-        let resolvedTransactionIDs = resolveAwaitingMutations(
-            modelName: modelName,
-            targetKey: key,
-            txids: txids,
-            in: context
-        )
         let pending = unresolvedMutations(modelName: modelName, targetKey: key, in: context)
 
         if pending.isEmpty,
@@ -517,32 +432,25 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
                     outcome: "preservedStaged"
                 )
             )
-            return DeleteOutcome(resolvedTransactionIDs: resolvedTransactionIDs, deleted: false)
+            return DeleteOutcome(resolvedTransactionIDs: [], deleted: false)
         }
 
-        if pending.contains(where: { $0.operation == .delete }) {
-            logApply(
-                "skipped delete because local delete is pending",
-                metadata: messageMetadata(
-                    message,
-                    shapeID: shapeID,
-                    offset: offset,
-                    extra: [
-                        "modelName": modelName,
-                        "collectionID": collectionID ?? "",
-                        "key": key,
-                        "pendingMutationCount": String(pending.count),
-                        "outcome": "pendingDelete",
-                    ]
-                )
-            )
-            return DeleteOutcome(resolvedTransactionIDs: resolvedTransactionIDs, deleted: false)
+        let existed = try fetchModel(key: key, in: context) != nil
+        _ = try materializer.apply(.absence, for: key)
+        try materializer.materialize(key: key)
+        let resolvedTransactionIDs = resolveAwaitingMutations(
+            modelName: modelName,
+            targetKey: key,
+            txids: txids,
+            allowedOperations: [.delete],
+            in: context
+        )
+        if resolvedTransactionIDs.isEmpty == false {
+            try materializer.materialize(key: key)
         }
-
-        var deleted = false
-        if pending.isEmpty, let existing = try fetchModel(key: key, in: context) {
-            context.delete(existing)
-            deleted = true
+        let remains = try fetchModel(key: key, in: context) != nil
+        let deleted = existed && !remains
+        if deleted {
             logApply(
                 "deleted model from SwiftData",
                 metadata: messageMetadata(
@@ -604,6 +512,7 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
         modelName: String,
         targetKey: String,
         txids: [Int64],
+        allowedOperations: Set<CollectionMutationOperation>,
         in context: ModelContext
     ) -> Set<UUID> {
         guard txids.isEmpty == false else { return [] }
@@ -613,7 +522,8 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
         let transactionsByID = pendingTransactionsByID(in: context)
 
         for mutation in unresolvedMutations(modelName: modelName, targetKey: targetKey, in: context)
-        where mutation.status == .awaitingSync
+        where allowedOperations.contains(mutation.operation)
+            && mutation.status == .awaiting
             && transactionAwaitedTXIDs(
                 for: mutation.transactionID,
                 transactionsByID: transactionsByID
@@ -652,19 +562,6 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
         transactionsByID: [UUID: PendingCollectionTransaction]
     ) -> Set<Int64> {
         Set(transactionsByID[transactionID]?.awaitedObservationTokens.compactMap(Int64.init) ?? [])
-    }
-
-    private func applyPendingSummary(_ pending: [PendingCollectionMutation], to model: Model) {
-        model.collectionPendingMutationCount = pending.count
-        if pending.contains(where: { $0.status.requiresSyncErrorState }) {
-            model.collectionSyncState = .syncError
-        } else if pending.contains(where: { $0.operation == .create }) {
-            model.collectionSyncState = .pendingCreate
-        } else if pending.contains(where: { $0.operation == .delete }) {
-            model.collectionSyncState = .pendingDelete
-        } else {
-            model.collectionSyncState = .pendingUpdate
-        }
     }
 
     private func unresolvedMutations(

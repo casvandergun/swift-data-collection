@@ -13,7 +13,7 @@ The package is intentionally split into two deliverables:
 
 Latest released version: `v0.1.2`.
 
-`main` contains unreleased `v0.2.0`-targeted hardening work: durable staged inserts, serialized managed writes, retry bounds, network-aware offline pause/resume, reconnect retry reset, non-retriable error handling, and updated offline transaction parity documentation.
+`main` contains unreleased `v0.2.0`-targeted hardening work: durable staged inserts, serialized managed writes, retry bounds, network-aware offline pause/resume, reconnect retry reset, and coordinated permanent-refusal inspection and repair.
 
 The collection path is restart-grade and offline-aware. Transaction durability is transaction-first on disk, optimistic deletes are recoverable, retry/replay is autonomous, network loss pauses outbound dispatch, reconnect resumes eligible work, one managed shape or collection per model type is enforced, and the release-grade evidence bar is in place.
 
@@ -37,13 +37,18 @@ Ship the offline transaction hardening already on `main` together with coordinat
 - Per-collection serialization of managed coordinator and adapter SwiftData writes.
 - Adapter-driven resolution of staged rows, with staged work preserved during deletes and resets.
 - Per-collection `CollectionDispatchWait`, defaulting to the existing `.dispatchAttempted` behaviour, plus a public `flush()` for explicit drains.
+- Private per-dirty-key authoritative evidence and deterministic overlay materialization shared by the coordinator, Electric, and Fetch without adding a UI read/query layer.
+- Monotonic transaction sequencing, stable compacted dispatch groups, frozen retry requests, and same-key conflict barriers.
+- Public conflict snapshots/update streams and atomic group discard with successor payload repair.
+- A schema-composition helper and startup validation for runtime metadata; v0.2.0 uses an explicit hard schema/source migration.
+- Distinct row states: `.error` for retryable failures and `.conflicted` for permanently refused intent.
 
 ### Planned Decisions
 
 - Decide whether `.durablyQueued` should become the default `CollectionDispatchWait`, and in which version.
   Awaiting dispatch inside a write is arguably at odds with the package's local-first stance: on a slow
   network it turns an offline-capable local write into a stall. It is also observable behaviour that
-  callers depend on today -- post-dispatch state such as `awaitingSync` and `conflicted` is readable the
+  callers depend on today -- post-dispatch state such as `awaiting` and `conflicted` is readable the
   moment a write returns, and the package's own tests assert exactly that. Flipping the default is
   therefore a breaking change that requires migrating those tests onto `flush()` or
   `CollectionTransaction.wait()`, and it belongs in a deliberate major version rather than alongside
@@ -94,27 +99,6 @@ Do not use `v0.1.3` for the current offline connectivity work unless the release
 - Thread `ElectricCollectionSyncUtilities` through richer handler contexts if the public API needs it, while keeping Electric-specific utilities out of `SwiftDataCollection`.
 - Define revision or ordering-evidence semantics before considering a general authoritative direct-write API.
 
-## v0.2.0 Planned Scope — Conflict Inspection And Repair
-
-### Release Goal
-
-Complete the permanent-refusal path with durable conflict inspection and atomic discard, preserving SwiftData as the only reactive row/query surface. The selected design is in [Conflict repair](docs/proposals/conflict-resolution-and-optimistic-revert.md). These are planned changes, not capabilities already present on main.
-
-- Add private per-dirty-key base metadata with known-row, known-absence, and unknown states; retain it only while intent requires resolution.
-- Centralize base advancement, ordered overlays, successor representation repair, and row-state derivation in a backend-neutral materialization module shared by Electric and Fetch.
-- Reuse persisted transaction `sequenceNumber` consistently for overlays; add atomic allocation from a durable collection counter and deterministic within-transaction ordering where needed.
-- Preserve recoverable optimistic deletes and staged-row semantics; handle immediate acceptance, Electric observation/checkpoints, Fetch completion, and reset/refetch explicitly.
-- Persist compacted dispatch identity, membership, and frozen submitted requests without overwriting source intent. Preserve request bodies and membership across automatic retries.
-- Block same-key successors behind unresolved conflicts, while unrelated keys continue. Repair never-submitted successor representations on discard.
-- Expose conflict group snapshots, independent update streams, and atomic group discard; use `.conflicted` for permanent refusals and `.syncError` for retryable failures.
-- Provide schema composition and consumer upgrade guidance. Validate real-store migrations; legacy bases or compaction membership that cannot be recovered remain explicitly unknown/recovery-required, with destructive repair unavailable until authoritative recovery.
-
-### Release Gates And Deferred Surface
-
-- Verify atomic multi-key failure handling, restart, migration, adapter evidence ordering, soft deletes, and stable retries before release.
-- Keep manual conflict retry, automatic/custom resolution policies, amend/merge execution, and general outbox deletion deferred until their contracts are justified by concrete consumers.
-- Record implemented behavior in CHANGELOG and update README migration instructions as implementation lands. Do not advertise planned repair as available.
-
 ## Backlog
 
 ### Concurrent-Edit Detection
@@ -162,11 +146,11 @@ Private base metadata retained only for unresolved keys is permitted as write-co
 
 The Swift implementation should match TanStack's behavior where it maps cleanly to SwiftData, but these differences are intentional or still open:
 
-- **Authoritative completion:** TanStack removes an outbox transaction when the mutation function succeeds. Electric-backed collections may remain `.awaitingSync` until observed txids or refresh completion prove that SwiftData has seen the authoritative write.
-- **Permanent failures:** TanStack's `NonRetriableError` removes the transaction from the outbox and rejects waiters. SwiftDataCollection marks transaction and mutations `.conflicted` and leaves affected rows in `syncError` so the app can surface or repair local state.
+- **Authoritative completion:** TanStack removes an outbox transaction when the mutation function succeeds. Electric-backed collections may remain `.awaiting` until observed txids or refresh completion prove that SwiftData has seen the authoritative write.
+- **Permanent failures:** TanStack's `NonRetriableError` removes the transaction from the outbox and rejects waiters. SwiftDataCollection parks transaction and mutation state as `.conflicted`, exposes the conflict group for inspection, and leaves its intent materialized until explicit discard.
 - **Scheduling scope:** TanStack schedules through one global executor. SwiftDataCollection schedules per collection today; `v0.2.0` should decide whether a store-level scheduler or explicit dependency model is the right SwiftData adaptation.
 - **Storage and leadership:** TanStack needs IndexedDB/localStorage fallback and Web Locks/BroadcastChannel leader election. SwiftDataCollection uses SwiftData durability and does not have browser tab leadership.
-- **Outbox administration:** TanStack exposes outbox inspection and removal APIs. SwiftDataCollection has persisted outbox models and traces, but no polished public admin API yet.
+- **Outbox administration:** TanStack exposes broad outbox inspection and removal APIs. SwiftDataCollection intentionally exposes only conflict-group inspection and safe discard today; generic administration remains deferred.
 - **Retry filtering:** TanStack has `beforeRetry` to filter loaded transactions before replay. SwiftDataCollection does not yet expose an equivalent hook.
 - **Idempotency ergonomics:** TanStack passes an explicit `idempotencyKey` into mutation functions. SwiftDataCollection handlers can use `context.transaction.id`, but a named idempotency-key convenience is still open.
 
@@ -177,7 +161,7 @@ The Swift implementation should match TanStack's behavior where it maps cleanly 
 - Dynamic headers and parameters are not yet supported.
 - Postgres coercion coverage is still incomplete.
 - Dispatch scheduling is per collection, not globally FIFO across all collections.
-- Public outbox administration APIs are not yet exposed.
+- General pending/running outbox administration is not exposed; only conflict inspection and discard are public.
 - Mutation handlers do not yet receive a named idempotency-key field; use the transaction ID when idempotency is required.
 - There is no `beforeRetry`-style hook for apps to filter or drop loaded transactions before replay.
 - Resolved/conflicted outbox retention is not yet bounded by a cleanup policy.

@@ -43,6 +43,9 @@ actor CollectionCoordinator<
     private var scheduledRetryAt: Date?
     private var scheduledRetryTask: Task<Void, Never>?
     private var debugEvents: [String] = []
+    private var conflictContinuations: [
+        UUID: AsyncThrowingStream<[CollectionConflict], any Error>.Continuation
+    ] = [:]
 
     init(
         collectionID: String,
@@ -109,7 +112,7 @@ actor CollectionCoordinator<
                 )
                 transaction.status = .pending
             }
-            if transaction.status == .awaitingSync,
+            if transaction.status == .awaiting,
                let completion: CollectionMutationCompletion = transaction.completion() {
                 switch completion {
                 case .awaitTokens(let tokens):
@@ -134,14 +137,22 @@ actor CollectionCoordinator<
                         metadata: transactionTraceMetadata(transaction)
                     )
                 case .immediate:
-                    writeGate.withCriticalSection {
-                        reconciler.resolveTransaction(id: transaction.id, collectionID: collectionID)
+                    // Immediate completion is already represented by resolved
+                    // mutation records. Keep bootstrap's cached context as the
+                    // sole writer here; resolving through a second context and
+                    // then saving this stale queue context could resurrect the
+                    // awaiting state after a restart.
+                    transaction.status = .resolved
+                    for mutation in queue.fetchPendingMutations(transactionID: transaction.id) {
+                        mutation.status = .resolved
+                        mutation.errorMessage = nil
                     }
                 }
             }
         }
 
         try? saveQueueContext()
+        invalidateQueueContext()
         refreshPendingModelStates()
         await drainDispatchIfNeeded()
         trace(
@@ -178,6 +189,98 @@ actor CollectionCoordinator<
 
     func flush() async {
         await bootstrapIfNeeded()
+        await drainDispatchIfNeeded()
+    }
+
+    func conflicts() async throws -> [CollectionConflict] {
+        await bootstrapIfNeeded()
+        return try conflictSnapshot()
+    }
+
+    func conflictUpdates() async -> AsyncThrowingStream<[CollectionConflict], any Error> {
+        await bootstrapIfNeeded()
+        let subscriptionID = UUID()
+        let pair = AsyncThrowingStream<[CollectionConflict], any Error>.makeStream(
+            bufferingPolicy: .bufferingNewest(1)
+        )
+        conflictContinuations[subscriptionID] = pair.continuation
+        pair.continuation.onTermination = { [weak self] _ in
+            Task { await self?.removeConflictContinuation(subscriptionID) }
+        }
+        do {
+            pair.continuation.yield(try conflictSnapshot())
+        } catch {
+            conflictContinuations.removeValue(forKey: subscriptionID)
+            pair.continuation.finish(throwing: error)
+        }
+        return pair.stream
+    }
+
+    func discard(_ conflictID: UUID) async throws {
+        await bootstrapIfNeeded()
+        do {
+            try writeGate.withCriticalSection {
+                let context = ModelContext(modelContainer)
+                let allTransactions = try context.fetch(FetchDescriptor<PendingCollectionTransaction>())
+                    .filter { $0.collectionID == collectionID }
+                let members = allTransactions
+                    .filter { ($0.dispatchGroupID ?? $0.id) == conflictID }
+                    .sorted(by: Self.transactionIsEarlier)
+
+                guard members.isEmpty == false else {
+                    throw CollectionConflictError.notFound(conflictID)
+                }
+                if members.allSatisfy({ $0.status == .discarded }) {
+                    return
+                }
+                guard members.allSatisfy({ $0.status == .conflicted }) else {
+                    throw CollectionConflictError.notConflicted(conflictID)
+                }
+
+                guard let leader = members.first(where: { $0.id == conflictID }),
+                      leader.submittedMutationsData != nil else {
+                    throw CollectionConflictError.unsupportedLegacySubmission(conflictID)
+                }
+
+                let memberIDs = Set(members.map(\.id))
+                let mutations = try context.fetch(FetchDescriptor<PendingCollectionMutation>())
+                    .filter { memberIDs.contains($0.transactionID) }
+                let keys = Set(mutations.map(\.targetKey))
+                let materializer = makeMaterializer(in: context)
+                let unknownKeys = try keys.filter {
+                    guard let evidence = try materializer.baselineEvidence(for: $0) else { return true }
+                    return evidence == .unknown
+                }.sorted()
+                guard unknownKeys.isEmpty else {
+                    throw CollectionConflictError.requiresAuthoritativeRecovery(
+                        conflictID,
+                        keys: unknownKeys
+                    )
+                }
+
+                for transaction in members {
+                    transaction.status = .discarded
+                    transaction.nextRetryAt = nil
+                }
+                for mutation in mutations {
+                    mutation.status = .discarded
+                    mutation.nextRetryAt = nil
+                }
+                try materializer.rebuildNeverSubmittedSuccessorPayloads(for: keys)
+                try materializer.materialize(keys: keys)
+                try commitSave(context)
+            }
+        } catch {
+            // The fresh write context is discarded, but the long-lived queue
+            // context may have retained objects from before the failed commit.
+            // Clear it before the next eligibility scan, otherwise a failed
+            // discard can make a successor appear permanently blocked.
+            invalidateQueueContext()
+            throw error
+        }
+        invalidateQueueContext()
+
+        publishConflictSnapshot()
         await drainDispatchIfNeeded()
     }
 
@@ -475,19 +578,9 @@ actor CollectionCoordinator<
                 return liveTransaction
             }
 
-            let sequenceNumber = queue.nextTransactionSequenceNumber(collectionID: collectionID)
-            let pendingTransaction = PendingCollectionTransaction(
-                id: liveTransaction.id,
-                collectionID: collectionID,
-                shapeID: sourceID,
-                modelName: configuration.modelName,
-                sequenceNumber: sequenceNumber,
-                status: .pending
-            )
             let persistedMutations = try preparedTransaction.persistedMutations()
-            try commitPreparedTransaction(
+            let sequenceNumber = try commitPreparedTransaction(
                 preparedTransaction,
-                pendingTransaction: pendingTransaction,
                 persistedMutations: persistedMutations
             )
             await liveTransaction.markDurablyQueued()
@@ -564,13 +657,28 @@ actor CollectionCoordinator<
             debug("observed tokens \(observedTokens.map(tokenString).sorted()) for source \(sourceID)")
         }
 
-        let completedTransactionIDs = writeGate.withCriticalSection {
-            reconciler.resolveTransactions(
-                observedTokens: observedTokens,
-                collectionID: collectionID,
-                remainingTokensByTransactionID: &remainingTokensByTransactionID,
-                awaitedTransactionIDsByToken: &awaitedTransactionIDsByToken
+        let completedTransactionIDs: [UUID]
+        do {
+            completedTransactionIDs = try writeGate.withCriticalSection {
+                try reconciler.resolveTransactions(
+                    observedTokens: observedTokens,
+                    collectionID: collectionID,
+                    remainingTokensByTransactionID: &remainingTokensByTransactionID,
+                    awaitedTransactionIDsByToken: &awaitedTransactionIDsByToken,
+                    materialize: { context, keys in
+                        try self.makeMaterializer(in: context).materialize(keys: keys)
+                    }
+                )
+            }
+            invalidateQueueContext()
+        } catch {
+            invalidateQueueContext()
+            await transitionLifecycle(
+                to: .error(String(describing: error)),
+                reason: "failed to persist adapter acknowledgement",
+                errorMessage: String(describing: error)
             )
+            return
         }
         for transactionID in completedTransactionIDs {
             if let liveTransaction = liveTransactions.removeValue(forKey: transactionID) {
@@ -586,6 +694,7 @@ actor CollectionCoordinator<
         }
 
         await transitionLifecycle(to: .ready, reason: "adapter batch applied", errorMessage: nil, lastSyncedAt: lastSyncedAt)
+        publishConflictSnapshot()
         await drainDispatchIfNeeded()
     }
 
@@ -594,8 +703,18 @@ actor CollectionCoordinator<
         awaitingRefreshTransactionIDs.removeAll()
 
         for transactionID in transactionIDs {
-            writeGate.withCriticalSection {
-                reconciler.resolveTransaction(id: transactionID, collectionID: collectionID)
+            let resolved = (try? writeGate.withCriticalSection {
+                try reconciler.resolveTransaction(
+                    id: transactionID,
+                    collectionID: collectionID,
+                    materialize: { context, keys in
+                        try self.makeMaterializer(in: context).materialize(keys: keys)
+                    }
+                )
+            }) ?? false
+            guard resolved else {
+                awaitingRefreshTransactionIDs.insert(transactionID)
+                continue
             }
             if let liveTransaction = liveTransactions.removeValue(forKey: transactionID) {
                 await liveTransaction.complete()
@@ -608,6 +727,8 @@ actor CollectionCoordinator<
         }
 
         refreshPendingModelStates()
+        invalidateQueueContext()
+        publishConflictSnapshot()
         await transitionLifecycle(to: .ready, reason: "adapter refresh completed", errorMessage: nil, lastSyncedAt: lastSyncedAt)
     }
 
@@ -675,7 +796,7 @@ actor CollectionCoordinator<
         while true {
             while pendingDispatchIDs.isEmpty == false {
                 let id = pendingDispatchIDs.removeFirst()
-                await processPendingTransaction(id: id)
+                guard await processPendingTransaction(id: id) else { return }
             }
 
             let eligibleIDs = queue.eligibleDispatchTransactionIDs(
@@ -700,12 +821,12 @@ actor CollectionCoordinator<
         }
     }
 
-    private func processPendingTransaction(id: UUID) async {
-        guard connectivityState == .online else { return }
+    private func processPendingTransaction(id: UUID) async -> Bool {
+        guard connectivityState == .online else { return true }
         let transactionRecord = queue.fetchPendingTransaction(id: id, collectionID: collectionID)
-        guard let transactionRecord else { return }
-        guard transactionRecord.status == .pending || transactionRecord.status == .failed else { return }
-        guard transactionRecord.nextRetryAt.map({ $0 <= Date() }) ?? true else { return }
+        guard let transactionRecord else { return true }
+        guard transactionRecord.status == .pending || transactionRecord.status == .failed else { return true }
+        guard transactionRecord.nextRetryAt.map({ $0 <= Date() }) ?? true else { return true }
         guard queue.hasUnresolvedPredecessor(for: transactionRecord, collectionID: collectionID) == false else {
             trace(
                 .dispatchEnqueued,
@@ -715,81 +836,61 @@ actor CollectionCoordinator<
                 message: "deferred dispatch behind earlier same-key transaction",
                 metadata: transactionTraceMetadata(transactionRecord)
             )
-            return
+            return true
         }
 
-        let pendingMutations = queue.fetchPendingMutations(transactionID: id)
-        guard pendingMutations.isEmpty == false else { return }
-        let compactedDispatch = compactPendingSuccessors(
-            for: transactionRecord,
-            pendingMutations: pendingMutations
-        )
-        let representedTransactions = [transactionRecord] + compactedDispatch.transactions
-        let representedTransactionIDs = representedTransactions.map(\.id)
-        let stateMutations = pendingMutations + compactedDispatch.mutations
-        let touchedKeys = Set(stateMutations.map(\.targetKey))
-
-        for transaction in representedTransactions {
-            transaction.status = .sending
-            transaction.recordAttempt()
-            transaction.lastErrorMessage = nil
-            transaction.nextRetryAt = nil
+        let dispatch: PreparedDispatchGroup
+        do {
+            dispatch = try prepareDispatchGroup(for: id)
+        } catch {
+            invalidateQueueContext()
+            if let liveTransaction = liveTransactions.removeValue(forKey: id) {
+                await liveTransaction.fail(error)
+            }
+            await transitionLifecycle(
+                to: .error(String(describing: error)),
+                reason: "failed to persist submitted dispatch representation",
+                errorMessage: String(describing: error)
+            )
+            return false
         }
-        for mutation in stateMutations {
-            mutation.status = .sending
-            mutation.recordAttempt()
-            mutation.errorMessage = nil
-            mutation.nextRetryAt = nil
-        }
-        try? saveQueueContext()
-        refreshPendingModelStates(keys: touchedKeys)
 
-        let transaction = liveTransactions[id] ?? CollectionTransaction(id: id, collectionID: collectionID)
-        liveTransactions[id] = transaction
-        for transactionID in representedTransactionIDs {
+        let transaction = liveTransactions[dispatch.id]
+            ?? CollectionTransaction(id: dispatch.id, collectionID: collectionID)
+        liveTransactions[dispatch.id] = transaction
+        for transactionID in dispatch.transactionIDs {
             let liveTransaction = liveTransactions[transactionID] ?? CollectionTransaction(id: transactionID, collectionID: collectionID)
             liveTransactions[transactionID] = liveTransaction
             await liveTransaction.markSending()
         }
         trace(
             .dispatchStarted,
-            transactionID: id,
-            sequenceNumber: transactionRecord.sequenceNumber,
-            attemptCount: transactionRecord.attemptCount,
-            pendingMutationCount: pendingMutations.count,
+            transactionID: dispatch.id,
+            sequenceNumber: dispatch.sequenceNumber,
+            attemptCount: dispatch.attemptCount,
+            pendingMutationCount: dispatch.mutations.count,
             message: "dispatching queued transaction"
         )
 
         do {
             let completion = try await dispatchMutationGroups(
                 transaction: transaction,
-                pendingMutations: pendingMutations
+                mutations: dispatch.mutations
             )
 
             switch completion {
             case .immediate:
-                let immediateCompletion: CollectionMutationCompletion = .immediate
-                for representedTransaction in representedTransactions {
-                    representedTransaction.setCompletion(immediateCompletion)
-                    writeGate.withCriticalSection {
-                        reconciler.resolveTransaction(
-                            id: representedTransaction.id,
-                            collectionID: collectionID
-                        )
-                    }
-                }
-                try saveQueueContext()
-                refreshPendingModelStates(keys: touchedKeys)
-                for representedTransaction in representedTransactions {
-                    if let liveTransaction = liveTransactions.removeValue(forKey: representedTransaction.id) {
+                try completeImmediately(dispatch)
+                for representedTransactionID in dispatch.transactionIDs {
+                    if let liveTransaction = liveTransactions.removeValue(forKey: representedTransactionID) {
                         await liveTransaction.complete()
                     }
                     trace(
                         .transactionCompleted,
-                        transactionID: representedTransaction.id,
-                        sequenceNumber: representedTransaction.sequenceNumber,
-                        attemptCount: representedTransaction.attemptCount,
-                        message: representedTransaction.id == id
+                        transactionID: representedTransactionID,
+                        sequenceNumber: dispatch.sequenceNumber,
+                        attemptCount: dispatch.attemptCount,
+                        message: representedTransactionID == dispatch.id
                             ? "completed transaction immediately"
                             : "completed compacted transaction immediately"
                     )
@@ -800,65 +901,40 @@ actor CollectionCoordinator<
                     throw CollectionError.missingAwaitedObservationTokens
                 }
 
-                for representedTransaction in representedTransactions {
-                    representedTransaction.setCompletion(.awaitTokens(tokens))
-                    representedTransaction.status = .awaitingSync
-                    representedTransaction.lastErrorMessage = nil
-                }
-                for mutation in stateMutations {
-                    mutation.status = .awaitingSync
-                    mutation.errorMessage = nil
-                }
-                try saveQueueContext()
-                refreshPendingModelStates(keys: touchedKeys)
+                try markDispatchGroupAwaiting(dispatch, completion: .awaitTokens(tokens))
 
-                for representedTransaction in representedTransactions {
-                    register(transactionID: representedTransaction.id, awaiting: tokens)
-                    if let liveTransaction = liveTransactions[representedTransaction.id] {
-                        await liveTransaction.markAwaitingSync()
+                for representedTransactionID in dispatch.transactionIDs {
+                    register(transactionID: representedTransactionID, awaiting: tokens)
+                    if let liveTransaction = liveTransactions[representedTransactionID] {
+                        await liveTransaction.markAwaiting()
                     }
                     trace(
-                        .awaitingSync,
-                        transactionID: representedTransaction.id,
-                        sequenceNumber: representedTransaction.sequenceNumber,
-                        attemptCount: representedTransaction.attemptCount,
+                        .awaiting,
+                        transactionID: representedTransactionID,
+                        sequenceNumber: dispatch.sequenceNumber,
+                        attemptCount: dispatch.attemptCount,
                         awaitedTokens: tokens.map(tokenString).sorted(),
-                        pendingMutationCount: representedTransaction.id == id
-                            ? pendingMutations.count
-                            : queue.fetchPendingMutations(transactionID: representedTransaction.id).count,
-                        message: representedTransaction.id == id
+                        pendingMutationCount: queue.fetchPendingMutations(transactionID: representedTransactionID).count,
+                        message: representedTransactionID == dispatch.id
                             ? "awaiting observation tokens from adapter"
                             : "awaiting observation tokens from compacted adapter dispatch"
                     )
                 }
 
             case .refresh:
-                let refreshCompletion: CollectionMutationCompletion = .refresh
-                for representedTransaction in representedTransactions {
-                    representedTransaction.setCompletion(refreshCompletion)
-                    representedTransaction.status = .awaitingSync
-                    representedTransaction.lastErrorMessage = nil
-                }
-                for mutation in stateMutations {
-                    mutation.status = .awaitingSync
-                    mutation.errorMessage = nil
-                }
-                try saveQueueContext()
-                refreshPendingModelStates(keys: touchedKeys)
-                for representedTransaction in representedTransactions {
-                    awaitingRefreshTransactionIDs.insert(representedTransaction.id)
-                    if let liveTransaction = liveTransactions[representedTransaction.id] {
-                        await liveTransaction.markAwaitingSync()
+                try markDispatchGroupAwaiting(dispatch, completion: .refresh)
+                for representedTransactionID in dispatch.transactionIDs {
+                    awaitingRefreshTransactionIDs.insert(representedTransactionID)
+                    if let liveTransaction = liveTransactions[representedTransactionID] {
+                        await liveTransaction.markAwaiting()
                     }
                     trace(
-                        .awaitingSync,
-                        transactionID: representedTransaction.id,
-                        sequenceNumber: representedTransaction.sequenceNumber,
-                        attemptCount: representedTransaction.attemptCount,
-                        pendingMutationCount: representedTransaction.id == id
-                            ? pendingMutations.count
-                            : queue.fetchPendingMutations(transactionID: representedTransaction.id).count,
-                        message: representedTransaction.id == id
+                        .awaiting,
+                        transactionID: representedTransactionID,
+                        sequenceNumber: dispatch.sequenceNumber,
+                        attemptCount: dispatch.attemptCount,
+                        pendingMutationCount: queue.fetchPendingMutations(transactionID: representedTransactionID).count,
+                        message: representedTransactionID == dispatch.id
                             ? "awaiting adapter refresh completion"
                             : "awaiting adapter refresh completion from compacted dispatch"
                     )
@@ -866,31 +942,28 @@ actor CollectionCoordinator<
                 await adapterRuntime.refresh()
             }
         } catch {
-            if isNonRetriable(error) {
-                for representedTransaction in representedTransactions {
-                    representedTransaction.status = .conflicted
-                    representedTransaction.lastErrorMessage = String(describing: error)
-                    representedTransaction.nextRetryAt = nil
+            do {
+                try markDispatchGroupFailed(dispatch, error: error)
+            } catch {
+                // The group remains in its last durable state (normally
+                // `sending`). Stop this drain: continuing with a stale queue
+                // context can spin forever and/or invoke a handler twice.
+                invalidateQueueContext()
+                debug("failed to persist dispatch failure for \(configuration.debugName): \(error)")
+                for representedTransactionID in dispatch.transactionIDs {
+                    if let liveTransaction = liveTransactions.removeValue(forKey: representedTransactionID) {
+                        await liveTransaction.fail(error)
+                    }
                 }
-                for mutation in stateMutations {
-                    mutation.status = .conflicted
-                    mutation.errorMessage = String(describing: error)
-                    mutation.nextRetryAt = nil
-                }
-                try? saveQueueContext()
-            } else {
-                for representedTransaction in representedTransactions {
-                    representedTransaction.markFailed(error, retryPolicy: retryPolicy)
-                }
-                for mutation in stateMutations {
-                    mutation.markFailed(error, retryPolicy: retryPolicy)
-                }
-                try? saveQueueContext()
+                await transitionLifecycle(
+                    to: .error(String(describing: error)),
+                    reason: "failed to persist dispatch failure",
+                    errorMessage: String(describing: error)
+                )
+                return false
             }
 
-            refreshPendingModelStates(keys: touchedKeys)
-
-            for representedTransactionID in representedTransactionIDs {
+            for representedTransactionID in dispatch.transactionIDs {
                 if let liveTransaction = liveTransactions.removeValue(forKey: representedTransactionID) {
                     await liveTransaction.fail(error)
                 }
@@ -903,16 +976,17 @@ actor CollectionCoordinator<
             )
             trace(
                 .transactionFailed,
-                transactionID: id,
-                sequenceNumber: transactionRecord.sequenceNumber,
-                attemptCount: transactionRecord.attemptCount,
-                pendingMutationCount: pendingMutations.count,
+                transactionID: dispatch.id,
+                sequenceNumber: dispatch.sequenceNumber,
+                attemptCount: dispatch.attemptCount,
+                pendingMutationCount: dispatch.mutations.count,
                 message: isNonRetriable(error) ? "dispatch failed permanently" : "dispatch failed",
                 error: error,
                 metadata: ["nonRetriable": String(isNonRetriable(error))]
             )
-            debug("failed dispatch for \(configuration.debugName) transaction \(id): \(error)")
+            debug("failed dispatch for \(configuration.debugName) transaction \(dispatch.id): \(error)")
         }
+        return true
     }
 
     private func scheduleNextRetryIfNeeded(now: Date = Date()) {
@@ -981,139 +1055,324 @@ actor CollectionCoordinator<
 
     private func commitPreparedTransaction(
         _ preparedTransaction: PreparedCollectionTransaction,
-        pendingTransaction: PendingCollectionTransaction,
         persistedMutations: [PendingCollectionMutation]
-    ) throws {
-        try writeGate.withCriticalSection {
-            let context = ModelContext(modelContainer)
-            try validatePromotions(
-                preparedTransaction.optimisticChanges,
-                in: context
-            )
-            context.insert(pendingTransaction)
-            for mutation in persistedMutations {
-                context.insert(mutation)
-            }
+    ) throws -> Int {
+        do {
+            let sequenceNumber = try writeGate.withCriticalSection {
+                let context = ModelContext(modelContainer)
+                let transactions = try context.fetch(FetchDescriptor<PendingCollectionTransaction>())
+                    .filter { $0.collectionID == collectionID }
+                let maximumSequence = transactions.map(\.sequenceNumber).max() ?? -1
+                guard maximumSequence < Int.max else {
+                    throw CollectionError.transactionSequenceOverflow
+                }
+                let metadata = try fetchOrCreateCollectionMetadata(in: context)
+                let seededNext = max(metadata.nextTransactionSequence, maximumSequence + 1)
+                guard seededNext < Int.max else {
+                    throw CollectionError.transactionSequenceOverflow
+                }
+                metadata.nextTransactionSequence = seededNext + 1
 
-            try applyOptimisticChanges(
-                preparedTransaction.optimisticChanges,
-                in: context
-            )
-
-            for key in preparedTransaction.touchedKeys {
-                try CollectionMutationReconciler.refreshModelState(
-                    for: Model.self,
-                    key: key,
+                let pendingTransaction = PendingCollectionTransaction(
+                    id: preparedTransaction.transactionID,
+                    collectionID: collectionID,
+                    shapeID: sourceID,
                     modelName: configuration.modelName,
-                    identifier: configuration.identifier,
+                    sequenceNumber: seededNext,
+                    status: .pending
+                )
+                try validatePromotions(
+                    preparedTransaction.optimisticChanges,
                     in: context
                 )
+                let materializer = makeMaterializer(in: context)
+                for mutation in preparedTransaction.mutations {
+                    try materializer.captureBaselineIfNeeded(
+                        for: mutation.key,
+                        operation: mutation.operation
+                    )
+                }
+                context.insert(pendingTransaction)
+                for mutation in persistedMutations {
+                    context.insert(mutation)
+                }
+
+                try applyOptimisticChanges(
+                    preparedTransaction.optimisticChanges,
+                    in: context
+                )
+
+                for key in preparedTransaction.touchedKeys {
+                    try materializer.materialize(key: key)
+                }
+
+                try commitSave(context)
+
+                try traceCommittedOptimisticChanges(
+                    preparedTransaction.mutations,
+                    transactionID: preparedTransaction.transactionID,
+                    in: context
+                )
+                return seededNext
             }
-
-            try commitSave(context)
-
-            try traceCommittedOptimisticChanges(
-                preparedTransaction.mutations,
-                transactionID: preparedTransaction.transactionID,
-                in: context
-            )
+            // The queue context may have fetched this collection before the
+            // fresh atomic write. Refresh it before scheduling the new ID.
+            invalidateQueueContext()
+            return sequenceNumber
+        } catch {
+            invalidateQueueContext()
+            throw error
         }
     }
 
-    private struct CompactedDispatch {
-        let transactions: [PendingCollectionTransaction]
-        let mutations: [PendingCollectionMutation]
+    private struct PreparedDispatchGroup {
+        let id: UUID
+        let transactionIDs: [UUID]
+        let mutations: [CollectionMutation]
+        let touchedKeys: Set<String>
+        let sequenceNumber: Int
+        let attemptCount: Int
     }
 
-    private func compactPendingSuccessors(
-        for transaction: PendingCollectionTransaction,
-        pendingMutations: [PendingCollectionMutation]
-    ) -> CompactedDispatch {
-        guard pendingMutations.count == 1,
-              let baseMutation = pendingMutations.first,
-              baseMutation.operation == .create || baseMutation.operation == .update else {
-            return CompactedDispatch(transactions: [], mutations: [])
-        }
+    private func prepareDispatchGroup(for requestedID: UUID) throws -> PreparedDispatchGroup {
+        do {
+            let dispatch = try writeGate.withCriticalSection {
+                let context = ModelContext(modelContainer)
+                let transactions = try context.fetch(FetchDescriptor<PendingCollectionTransaction>())
+                    .filter { $0.collectionID == collectionID }
+                    .sorted(by: Self.transactionIsEarlier)
+                guard let requested = transactions.first(where: { $0.id == requestedID }) else {
+                    throw CollectionConflictError.notFound(requestedID)
+                }
+                guard requested.status == .pending || requested.status == .failed else {
+                    throw CollectionConflictError.notConflicted(requestedID)
+                }
+                let allMutations = try context.fetch(FetchDescriptor<PendingCollectionMutation>())
+                let mutationsByTransaction = Dictionary(grouping: allMutations, by: \.transactionID)
 
-        let successors = queue.compactableSuccessorTransactions(
-            after: transaction,
-            collectionID: collectionID,
-            targetKey: baseMutation.targetKey,
-            operation: .update,
-            now: Date()
-        )
-        guard successors.isEmpty == false else {
-            return CompactedDispatch(transactions: [], mutations: [])
-        }
+                let groupID = requested.dispatchGroupID ?? requested.id
+                var members: [PendingCollectionTransaction]
+                var submitted: [CollectionMutation]
 
-        var latestPayload = baseMutation.payload
-        var latestMetadata = baseMutation.metadata
-        var compactedTransactions: [PendingCollectionTransaction] = []
-        var compactedMutations: [PendingCollectionMutation] = []
+                if requested.dispatchGroupID != nil {
+                    members = transactions.filter { $0.dispatchGroupID == groupID }
+                    guard let leader = members.first(where: { $0.id == groupID }),
+                          let data = leader.submittedMutationsData else {
+                        throw CollectionConflictError.unsupportedLegacySubmission(groupID)
+                    }
+                    submitted = try JSONDecoder().decode([CollectionMutation].self, from: data)
+                    guard submitted.isEmpty == false else {
+                        throw CollectionError.modelNotFound(groupID.uuidString)
+                    }
+                } else {
+                    members = [requested]
+                    let leadingPending = (mutationsByTransaction[requested.id] ?? [])
+                        .sorted(by: Self.mutationIsEarlier)
+                    guard leadingPending.isEmpty == false else {
+                        throw CollectionError.modelNotFound(requested.id.uuidString)
+                    }
+                    submitted = leadingPending.map(makeCollectionMutation(from:))
 
-        for successor in successors {
-            latestPayload = successor.mutation.payload
-            if successor.mutation.metadata.isEmpty == false {
-                latestMetadata = successor.mutation.metadata
+                    if leadingPending.count == 1,
+                       let leading = leadingPending.first,
+                       leading.operation == .create || leading.operation == .update {
+                        for successor in transactions where Self.transactionIsEarlier(requested, successor) {
+                            let pending = (mutationsByTransaction[successor.id] ?? [])
+                                .sorted(by: Self.mutationIsEarlier)
+                            let touchesLeadingKey = pending.contains { $0.targetKey == leading.targetKey }
+                            // A transaction for another key does not affect this
+                            // compaction run. Once the same key is encountered,
+                            // however, an ineligible transaction is a durable
+                            // ordering barrier and must not be crossed.
+                            guard touchesLeadingKey else { continue }
+                            guard successor.status == .pending,
+                                  successor.dispatchGroupID == nil,
+                                  successor.submittedMutationsData == nil,
+                                  successor.attemptCount == 0 else {
+                                break
+                            }
+                            guard pending.count == 1,
+                                  let successorMutation = pending.first,
+                                  successorMutation.targetKey == leading.targetKey,
+                                  successorMutation.operation == .update,
+                                  successorMutation.status == .pending,
+                                  let merged = try CollectionMutationMerger.merge(
+                                    existing: submitted[0],
+                                    incoming: makeCollectionMutation(from: successorMutation)
+                                  ) else {
+                                break
+                            }
+                            submitted[0] = merged
+                            members.append(successor)
+                        }
+                    }
+
+                    let frozenData = try JSONEncoder().encode(submitted)
+                    for member in members {
+                        member.dispatchGroupID = groupID
+                    }
+                    requested.submittedMutationsData = frozenData
+                }
+
+                members.sort(by: Self.transactionIsEarlier)
+                let memberIDs = Set(members.map(\.id))
+                let stateMutations = allMutations.filter { memberIDs.contains($0.transactionID) }
+                for member in members {
+                    member.status = .sending
+                    member.recordAttempt()
+                    member.lastErrorMessage = nil
+                    member.nextRetryAt = nil
+                }
+                for mutation in stateMutations {
+                    mutation.status = .sending
+                    mutation.recordAttempt()
+                    mutation.errorMessage = nil
+                    mutation.nextRetryAt = nil
+                }
+                try makeMaterializer(in: context).materialize(keys: stateMutations.map(\.targetKey))
+                try commitSave(context)
+
+                return PreparedDispatchGroup(
+                    id: groupID,
+                    transactionIDs: members.map(\.id),
+                    mutations: submitted,
+                    touchedKeys: Set(stateMutations.map(\.targetKey)),
+                    sequenceNumber: members.first?.sequenceNumber ?? requested.sequenceNumber,
+                    attemptCount: members.first?.attemptCount ?? requested.attemptCount
+                )
             }
-            compactedTransactions.append(successor.transaction)
-            compactedMutations.append(successor.mutation)
+            invalidateQueueContext()
+            return dispatch
+        } catch {
+            invalidateQueueContext()
+            throw error
         }
+    }
 
-        baseMutation.payload = latestPayload
-        baseMutation.metadata = latestMetadata
-        switch baseMutation.operation {
-        case .create:
-            baseMutation.changedFields = Set(latestPayload.keys)
-        case .update:
-            baseMutation.changedFields = changedFields(
-                from: baseMutation.originalRow ?? [:],
-                to: latestPayload
-            )
-        case .delete:
-            break
+    private func completeImmediately(_ dispatch: PreparedDispatchGroup) throws {
+        try updateDispatchGroup(dispatch) { transactions, mutations, materializer in
+            for mutation in dispatch.mutations {
+                switch mutation.operation {
+                case .create:
+                    guard let row = mutation.modified else {
+                        throw CollectionMaterializationError.invalidPersistedRow(key: mutation.key)
+                    }
+                    try materializer.accept(.create(row), for: mutation.key)
+                case .update:
+                    try materializer.accept(.update(mutation.changes), for: mutation.key)
+                case .delete:
+                    try materializer.accept(.delete, for: mutation.key)
+                }
+            }
+            for transaction in transactions {
+                transaction.setCompletion(.immediate)
+                transaction.status = .resolved
+                transaction.lastErrorMessage = nil
+            }
+            for mutation in mutations {
+                mutation.status = .resolved
+                mutation.errorMessage = nil
+            }
+            try materializer.materialize(keys: dispatch.touchedKeys)
         }
+    }
 
-        trace(
-            .mutationMerged,
-            transactionID: transaction.id,
-            key: baseMutation.targetKey,
-            operation: baseMutation.operation,
-            pendingMutationCount: compactedMutations.count + 1,
-            message: "compacted pending same-key updates into outbound \(baseMutation.operation.rawValue)",
-            metadata: [
-                "compactedTransactionIDs": compactedTransactions.map(\.id.uuidString).joined(separator: ","),
-                "compactedMutationCount": String(compactedMutations.count),
-                "changedFields": baseMutation.changedFields.sorted().joined(separator: ","),
-            ]
-        )
+    private func markDispatchGroupAwaiting(
+        _ dispatch: PreparedDispatchGroup,
+        completion: CollectionMutationCompletion
+    ) throws {
+        try updateDispatchGroup(dispatch) { transactions, mutations, materializer in
+            for transaction in transactions {
+                transaction.setCompletion(completion)
+                transaction.status = .awaiting
+                transaction.lastErrorMessage = nil
+            }
+            for mutation in mutations {
+                mutation.status = .awaiting
+                mutation.errorMessage = nil
+            }
+            try materializer.materialize(keys: dispatch.touchedKeys)
+        }
+    }
 
-        return CompactedDispatch(
-            transactions: compactedTransactions,
-            mutations: compactedMutations
-        )
+    private func markDispatchGroupFailed(
+        _ dispatch: PreparedDispatchGroup,
+        error: Error
+    ) throws {
+        let nonRetriable = isNonRetriable(error)
+        try updateDispatchGroup(dispatch) { transactions, mutations, materializer in
+            let now = Date()
+            for transaction in transactions {
+                if nonRetriable {
+                    transaction.status = .conflicted
+                    transaction.lastErrorMessage = String(describing: error)
+                    transaction.nextRetryAt = nil
+                    transaction.conflictOccurredAt = now
+                } else {
+                    transaction.markFailed(error, retryPolicy: retryPolicy, now: now)
+                }
+            }
+            for mutation in mutations {
+                if nonRetriable {
+                    mutation.status = .conflicted
+                    mutation.errorMessage = String(describing: error)
+                    mutation.nextRetryAt = nil
+                } else {
+                    mutation.markFailed(error, retryPolicy: retryPolicy, now: now)
+                }
+            }
+            try materializer.materialize(keys: dispatch.touchedKeys)
+        }
+        if nonRetriable {
+            publishConflictSnapshot()
+        }
+    }
+
+    private func updateDispatchGroup(
+        _ dispatch: PreparedDispatchGroup,
+        _ update: (
+            [PendingCollectionTransaction],
+            [PendingCollectionMutation],
+            CollectionMaterializer<Model, ID>
+        ) throws -> Void
+    ) throws {
+        do {
+            try writeGate.withCriticalSection {
+                let context = ModelContext(modelContainer)
+                let memberIDs = Set(dispatch.transactionIDs)
+                let transactions = try context.fetch(FetchDescriptor<PendingCollectionTransaction>())
+                    .filter { $0.collectionID == collectionID && memberIDs.contains($0.id) }
+                let mutations = try context.fetch(FetchDescriptor<PendingCollectionMutation>())
+                    .filter { memberIDs.contains($0.transactionID) }
+                try update(transactions, mutations, makeMaterializer(in: context))
+                try commitSave(context)
+            }
+            invalidateQueueContext()
+        } catch {
+            invalidateQueueContext()
+            throw error
+        }
     }
 
     private func dispatchMutationGroups(
         transaction: CollectionTransaction,
-        pendingMutations: [PendingCollectionMutation]
+        mutations: [CollectionMutation]
     ) async throws -> CollectionMutationCompletion {
         var awaitedTokens = Set<String>()
         var requiresRefresh = false
 
-        for group in CollectionMutationDispatcher.groups(from: pendingMutations) {
-            let mutations = group.map(makeCollectionMutation(from:))
-            let context = CollectionMutationContext<Model, ID>(transaction: transaction, mutations: mutations)
+        for group in CollectionMutationDispatcher.groups(from: mutations) {
+            let context = CollectionMutationContext<Model, ID>(transaction: transaction, mutations: group)
             trace(
                 .handlerInvoked,
                 transactionID: transaction.id,
-                key: group.first?.targetKey,
+                key: group.first?.key,
                 operation: group.first?.operation,
                 pendingMutationCount: group.count,
                 message: "invoking outbound mutation handler",
                 metadata: [
-                    "keys": group.map(\.targetKey).joined(separator: ","),
-                    "mutations": debugString(mutations.map(mutationDebugPayload)),
+                    "keys": group.map(\.key).joined(separator: ","),
+                    "mutations": debugString(group.map(mutationDebugPayload)),
                 ]
             )
 
@@ -1141,7 +1400,7 @@ actor CollectionCoordinator<
                 trace(
                     .handlerReturned,
                     transactionID: transaction.id,
-                    key: group.first?.targetKey,
+                    key: group.first?.key,
                     operation: group.first?.operation,
                     pendingMutationCount: group.count,
                     message: "outbound handler completed immediately",
@@ -1152,7 +1411,7 @@ actor CollectionCoordinator<
                 trace(
                     .handlerReturned,
                     transactionID: transaction.id,
-                    key: group.first?.targetKey,
+                    key: group.first?.key,
                     operation: group.first?.operation,
                     pendingMutationCount: group.count,
                     message: "outbound handler requested refresh completion",
@@ -1166,7 +1425,7 @@ actor CollectionCoordinator<
                 trace(
                     .handlerReturned,
                     transactionID: transaction.id,
-                    key: group.first?.targetKey,
+                    key: group.first?.key,
                     operation: group.first?.operation,
                     awaitedTokens: tokens.map(tokenString).sorted(),
                     pendingMutationCount: group.count,
@@ -1275,6 +1534,150 @@ actor CollectionCoordinator<
         try context.fetch(configuration.identifier.fetchDescriptor(forSerializedKey: key)).first
     }
 
+    private func fetchOrCreateCollectionMetadata(in context: ModelContext) throws -> CollectionMetadata {
+        if let existing = try context.fetch(FetchDescriptor<CollectionMetadata>())
+            .first(where: { $0.collectionID == collectionID }) {
+            return existing
+        }
+        let metadata = CollectionMetadata(
+            collectionID: collectionID,
+            shapeID: sourceID,
+            modelName: configuration.modelName,
+            debugName: configuration.debugName
+        )
+        context.insert(metadata)
+        return metadata
+    }
+
+    private func makeMaterializer(
+        in context: ModelContext
+    ) -> CollectionMaterializer<Model, ID> {
+        CollectionMaterializer(
+            context: context,
+            collectionID: collectionID,
+            modelName: configuration.modelName,
+            identifier: configuration.identifier,
+            rowDecoder: rowDecoder
+        )
+    }
+
+    private func conflictSnapshot() throws -> [CollectionConflict] {
+        try writeGate.withCriticalSection {
+            let context = ModelContext(modelContainer)
+            let transactions = try context.fetch(FetchDescriptor<PendingCollectionTransaction>())
+                .filter { $0.collectionID == collectionID }
+                .sorted(by: Self.transactionIsEarlier)
+            let conflictedGroupIDs = Set(
+                transactions
+                    .filter { $0.status == .conflicted }
+                    .map { $0.dispatchGroupID ?? $0.id }
+            )
+            let allMutations = try context.fetch(FetchDescriptor<PendingCollectionMutation>())
+            let materializer = makeMaterializer(in: context)
+
+            return try conflictedGroupIDs.map { groupID in
+                let members = transactions
+                    .filter { ($0.dispatchGroupID ?? $0.id) == groupID }
+                    .sorted(by: Self.transactionIsEarlier)
+                let memberIDs = Set(members.map(\.id))
+                let sourceMutations = allMutations
+                    .filter { memberIDs.contains($0.transactionID) }
+                    .sorted(by: Self.mutationIsEarlier)
+                let leader = members.first(where: { $0.id == groupID }) ?? members[0]
+                let submittedMutations: [CollectionMutation]?
+                if let data = leader.submittedMutationsData {
+                    submittedMutations = try JSONDecoder().decode([CollectionMutation].self, from: data)
+                } else {
+                    submittedMutations = nil
+                }
+                let representedMutations = submittedMutations ?? sourceMutations.map(makeCollectionMutation(from:))
+
+                var containsUnknownBaseline = false
+                let entries = try representedMutations.map { mutation in
+                    let evidence = try materializer.baselineEvidence(for: mutation.key) ?? .unknown
+                    if evidence == .unknown {
+                        containsUnknownBaseline = true
+                    }
+                    return CollectionConflictEntry(
+                        key: mutation.key,
+                        operation: mutation.operation,
+                        localChanges: mutation.changes,
+                        baselineEvidence: evidence
+                    )
+                }
+                let readiness: CollectionConflictRepairReadiness
+                if submittedMutations == nil && members.contains(where: { $0.attemptCount > 0 }) {
+                    readiness = .unsupportedLegacySubmission
+                } else if containsUnknownBaseline {
+                    readiness = .requiresAuthoritativeRecovery
+                } else {
+                    readiness = .ready
+                }
+
+                return CollectionConflict(
+                    id: groupID,
+                    transactionIDs: members.map(\.id),
+                    error: leader.lastErrorMessage ?? "Permanent mutation failure",
+                    occurredAt: members.compactMap(\.conflictOccurredAt).min()
+                        ?? members.map(\.updatedAt).min()
+                        ?? Date(),
+                    repairReadiness: readiness,
+                    entries: entries
+                )
+            }
+            .sorted { lhs, rhs in
+                if lhs.occurredAt != rhs.occurredAt {
+                    return lhs.occurredAt < rhs.occurredAt
+                }
+                return lhs.id.uuidString < rhs.id.uuidString
+            }
+        }
+    }
+
+    private func publishConflictSnapshot() {
+        guard conflictContinuations.isEmpty == false else { return }
+        do {
+            let snapshot = try conflictSnapshot()
+            for continuation in conflictContinuations.values {
+                continuation.yield(snapshot)
+            }
+        } catch {
+            let continuations = Array(conflictContinuations.values)
+            conflictContinuations.removeAll()
+            continuations.forEach { $0.finish(throwing: error) }
+        }
+    }
+
+    private func removeConflictContinuation(_ id: UUID) {
+        conflictContinuations.removeValue(forKey: id)
+    }
+
+    private static func transactionIsEarlier(
+        _ lhs: PendingCollectionTransaction,
+        _ rhs: PendingCollectionTransaction
+    ) -> Bool {
+        if lhs.sequenceNumber != rhs.sequenceNumber {
+            return lhs.sequenceNumber < rhs.sequenceNumber
+        }
+        if lhs.createdAt != rhs.createdAt {
+            return lhs.createdAt < rhs.createdAt
+        }
+        return lhs.id.uuidString < rhs.id.uuidString
+    }
+
+    private static func mutationIsEarlier(
+        _ lhs: PendingCollectionMutation,
+        _ rhs: PendingCollectionMutation
+    ) -> Bool {
+        if lhs.ordinal != rhs.ordinal {
+            return lhs.ordinal < rhs.ordinal
+        }
+        if lhs.createdAt != rhs.createdAt {
+            return lhs.createdAt < rhs.createdAt
+        }
+        return lhs.id.uuidString < rhs.id.uuidString
+    }
+
     private func register(transactionID: UUID, awaiting tokens: Set<String>) {
         guard tokens.isEmpty == false else { return }
         remainingTokensByTransactionID[transactionID] = tokens
@@ -1314,6 +1717,7 @@ actor CollectionCoordinator<
             }
             try? commitSave(context)
         }
+        invalidateQueueContext()
         trace(
             .pendingStateRefreshed,
             pendingMutationCount: queue.fetchAllPendingMutations(collectionID: collectionID).count,
@@ -1371,6 +1775,15 @@ actor CollectionCoordinator<
         try writeGate.withCriticalSection {
             try queue.saveContext()
         }
+    }
+
+    /// Fresh write contexts are used for every atomic transition, while the
+    /// queue context is retained for inexpensive eligibility reads. SwiftData
+    /// does not automatically invalidate objects already registered in that
+    /// context when another context commits, so explicitly roll it back after
+    /// each fresh-context transition (including failures).
+    private func invalidateQueueContext() {
+        queue.context.rollback()
     }
 
     private func tokenString(_ token: String) -> String {

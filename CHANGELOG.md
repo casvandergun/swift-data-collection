@@ -4,8 +4,14 @@ All notable package changes are tracked here by release.
 
 ## Unreleased - target v0.2.0
 
-- Corrected Electric and Fetch reconciliation so conflicted mutations remain part of the local overlay when authoritative data arrives, preserving local intent and the existing `syncError` row state.
-- Recorded the conflict-repair design within the combined v0.2.0 release scope, covering private base metadata, schema migration, stable compacted delivery groups, conflict inspection, and atomic discard. These are design/release-plan changes only; coordinated conflict repair is not implemented. Tracked concurrent-edit detection separately.
+- Added coordinated conflict repair backed by private per-dirty-key authoritative evidence and a deterministic materializer shared by the coordinator, Electric adapter, and Fetch adapter. SwiftData application models remain the only UI read/query layer.
+- Added durable conflict-group inspection through `conflicts()` and `conflictUpdates`, plus atomic `discard(_:)` that repairs visible rows and never-submitted successor payloads while preserving already-submitted request bodies.
+- Persisted monotonic transaction allocation, within-transaction mutation ordering, compacted dispatch-group membership, frozen submitted requests, and conflict occurrence metadata. Same-key successors remain blocked behind parked conflicts while unrelated keys continue.
+- Added `SwiftDataCollectionSchema.models(including:)` and startup schema validation for the runtime's private metadata. v0.2.0 is an explicit hard schema/source migration for older stores with dirty outboxes.
+- Renamed `CollectionSyncState.syncError` to `.error` with persisted raw value `error`, and now use `.conflicted` distinctly for permanently refused intent.
+- Renamed transaction and outbox `.awaitingSync` states to `.awaiting`, including the trace lifecycle state and persisted raw value.
+- Corrected Electric and Fetch reconciliation so conflicted mutations remain part of the local overlay until resolved, and made authoritative server absence beneath an update remove the visible row without discarding the retained intent.
+- Kept Electric reset bookkeeping limited to dirty keys while preserving evidence safely across multi-batch snapshots and restart.
 - Added durable `.stagedCreate` rows with collection APIs to stage, locally update, publish, and discard existing SwiftData models without prematurely creating outbound mutations.
 - Added per-managed-collection write serialization across coordinator commits, Electric batches, and Fetch snapshot application.
 - Added backend-neutral staged reconciliation so adapter upserts resolve staged rows while adapter deletes and resets preserve staged work.

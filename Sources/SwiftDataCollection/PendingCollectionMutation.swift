@@ -10,29 +10,28 @@ public enum CollectionMutationOperation: String, Sendable, Codable, Hashable {
 public enum PendingMutationStatus: String, Sendable, Codable, Hashable {
     case pending
     case sending
-    case awaitingSync
+    case awaiting
     case resolved
     case failed
     case conflicted
+    case discarded
 
-    /// Whether this mutation still contributes local intent during adapter reconciliation.
-    package var participatesInReconciliationOverlay: Bool {
+    package var requiresResolution: Bool {
         switch self {
-        case .pending, .sending, .awaitingSync, .failed, .conflicted:
+        case .pending, .sending, .awaiting, .failed, .conflicted:
             true
-        case .resolved:
+        case .resolved, .discarded:
             false
         }
     }
 
-    /// Whether this mutation should surface the row's existing sync-error state.
-    package var requiresSyncErrorState: Bool {
-        switch self {
-        case .failed, .conflicted:
-            true
-        case .pending, .sending, .awaitingSync, .resolved:
-            false
-        }
+    /// Whether this mutation still contributes local intent during adapter reconciliation.
+    package var participatesInReconciliationOverlay: Bool {
+        requiresResolution
+    }
+
+    package var blocksSuccessorDispatch: Bool {
+        requiresResolution
     }
 }
 
@@ -55,6 +54,7 @@ public final class PendingCollectionMutation {
     public var lastAttemptAt: Date?
     public var nextRetryAt: Date?
     public var errorMessage: String?
+    package var ordinal: Int = 0
 
     public init(
         id: UUID = UUID(),

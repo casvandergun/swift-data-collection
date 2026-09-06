@@ -127,7 +127,7 @@ public enum CollectionTraceEventKind: String, Sendable, Codable, Hashable {
     case dispatchStarted
     case handlerInvoked
     case handlerReturned
-    case awaitingSync
+    case awaiting
     case mutationResolved
     case shapeBatchApplied
     case transactionCompleted
@@ -294,7 +294,7 @@ public struct CollectionTraceEvent: Sendable, Hashable {
         case .stagedInsertCreated, .stagedInsertUpdated, .stagedInsertPublished,
              .stagedInsertDiscarded, .stagedInsertResolved:
             .info
-        case .handlerReturned, .awaitingSync:
+        case .handlerReturned, .awaiting:
             .info
         case .bootstrapStarted, .bootstrapCompleted, .lifecycleChanged,
              .replayScheduled, .replayStarted, .retryScheduled, .retryFired,

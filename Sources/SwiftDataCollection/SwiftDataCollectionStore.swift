@@ -119,6 +119,7 @@ public actor SwiftDataCollectionStore {
         _ model: Model.Type,
         options: CollectionOptions<Model, ID>
     ) async throws -> SwiftDataCollection<Model, ID> {
+        try SwiftDataCollectionSchema.validate(modelContainer)
         await bootstrapIfNeeded()
 
         let descriptor = CollectionManagedSourceDescriptor(sourceID: options.adapter.sourceID)

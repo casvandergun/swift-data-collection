@@ -71,12 +71,14 @@ struct CollectionConnectivityTests {
         connectivity.setState(.online)
 
         try await waitUntil {
-            await recorder.value() == 1
+            guard await recorder.value() == 1 else { return false }
+            let context = ModelContext(container)
+            return (try? context.fetch(FetchDescriptor<PendingCollectionTransaction>()).first?.status == .awaiting) ?? false
         }
 
         let onlineContext = ModelContext(container)
         let awaiting = try #require(onlineContext.fetch(FetchDescriptor<PendingCollectionTransaction>()).first)
-        #expect(awaiting.status == .awaitingSync)
+        #expect(awaiting.status == .awaiting)
         #expect(awaiting.awaitedObservationTokens == ["101"])
         #expect(traceRecorder.events.contains { $0.kind == .dispatchPausedOffline })
         #expect(traceRecorder.events.contains { $0.kind == .dispatchResumedOnline })
@@ -121,12 +123,14 @@ struct CollectionConnectivityTests {
         connectivity.setState(.online)
 
         try await waitUntil {
-            await recorder.value() == 2
+            guard await recorder.value() == 2 else { return false }
+            let context = ModelContext(container)
+            return (try? context.fetch(FetchDescriptor<PendingCollectionTransaction>()).first?.status == .awaiting) ?? false
         }
 
         let retriedContext = ModelContext(container)
         let retried = try #require(retriedContext.fetch(FetchDescriptor<PendingCollectionTransaction>()).first)
-        #expect(retried.status == .awaitingSync)
+        #expect(retried.status == .awaiting)
         #expect(retried.awaitedObservationTokens == ["202"])
     }
 
@@ -160,7 +164,7 @@ struct CollectionConnectivityTests {
         #expect(transaction.nextRetryAt == nil)
         #expect(mutation.status == .conflicted)
         #expect(mutation.nextRetryAt == nil)
-        #expect(row.collectionSyncState == .syncError)
+        #expect(row.collectionSyncState == .conflicted)
         #expect(row.collectionPendingMutationCount == 1)
     }
 }

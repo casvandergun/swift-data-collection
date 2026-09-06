@@ -7,7 +7,7 @@ package enum CollectionMutationCompletion: Sendable, Hashable, Codable {
     case refresh
 }
 
-public struct CollectionMutation: Sendable, Hashable {
+public struct CollectionMutation: Sendable, Hashable, Codable {
     public let operation: CollectionMutationOperation
     public let key: String
     public let original: CollectionRow?
@@ -86,7 +86,7 @@ package typealias CollectionAdapterMutationHandler<
 public enum CollectionTransactionStatus: Sendable, Hashable, Codable {
     case durablyQueued
     case sending
-    case awaitingSync
+    case awaiting
     case completed
     case failed(String)
 }
@@ -113,7 +113,7 @@ public actor CollectionTransaction {
             return
         case .failed(let message):
             throw CollectionTransactionFailure(message: message)
-        case .durablyQueued, .sending, .awaitingSync:
+        case .durablyQueued, .sending, .awaiting:
             try await withCheckedThrowingContinuation { continuation in
                 waiters.append(continuation)
             }
@@ -128,8 +128,8 @@ public actor CollectionTransaction {
         statusStorage = .sending
     }
 
-    public func markAwaitingSync() {
-        statusStorage = .awaitingSync
+    public func markAwaiting() {
+        statusStorage = .awaiting
     }
 
     public func complete() {
@@ -208,7 +208,7 @@ public struct CollectionAdapter<
  *
  * `dispatchAttempted` keeps the original behaviour: the call returns once the
  * outbound dispatch for the transaction has settled, so post-dispatch state
- * (`awaitingSync`, `conflicted`) is observable the moment the write returns.
+ * (`awaiting`, `conflicted`) is observable the moment the write returns.
  *
  * `durablyQueued` returns as soon as the transaction is committed to the
  * outbox and leaves dispatch to the runtime. Prefer it wherever a write sits
@@ -313,6 +313,9 @@ public struct SwiftDataCollection<Model: SwiftDataCollectionModel, ID: Hashable 
     private let updateStagedClosure: @Sendable (ID, @escaping @Sendable (Model) throws -> Void) async throws -> Void
     private let publishStagedInsertClosure: @Sendable (ID, [String: CollectionValue]) async throws -> CollectionTransaction
     private let discardStagedInsertClosure: @Sendable (ID) async throws -> Void
+    private let conflictsClosure: @Sendable () async throws -> [CollectionConflict]
+    private let conflictUpdatesClosure: @Sendable () async -> AsyncThrowingStream<[CollectionConflict], any Error>
+    private let discardConflictClosure: @Sendable (UUID) async throws -> Void
 
     public let sourceID: String
     public let debugName: String
@@ -341,6 +344,9 @@ public struct SwiftDataCollection<Model: SwiftDataCollectionModel, ID: Hashable 
             try await coordinator.publishStagedInsert(key, metadata: metadata)
         }
         self.discardStagedInsertClosure = { key in try await coordinator.discardStagedInsert(key) }
+        self.conflictsClosure = { try await coordinator.conflicts() }
+        self.conflictUpdatesClosure = { await coordinator.conflictUpdates() }
+        self.discardConflictClosure = { conflictID in try await coordinator.discard(conflictID) }
         self.sourceID = sourceID
         self.debugName = debugName
     }
@@ -422,5 +428,22 @@ public struct SwiftDataCollection<Model: SwiftDataCollectionModel, ID: Hashable 
 
     public func discardStagedInsert(_ key: ID) async throws {
         try await discardStagedInsertClosure(key)
+    }
+
+    /// Returns the currently parked permanent-failure groups for this collection.
+    public func conflicts() async throws -> [CollectionConflict] {
+        try await conflictsClosure()
+    }
+
+    /// Complete conflict snapshots, beginning with the current committed state.
+    /// Each access creates an independent newest-value-buffered subscription.
+    public var conflictUpdates: AsyncThrowingStream<[CollectionConflict], any Error> {
+        get async { await conflictUpdatesClosure() }
+    }
+
+    /// Abandons all local intent in a conflicted dispatch group and rebuilds the
+    /// visible rows from retained authoritative evidence plus surviving intent.
+    public func discard(_ conflictID: UUID) async throws {
+        try await discardConflictClosure(conflictID)
     }
 }

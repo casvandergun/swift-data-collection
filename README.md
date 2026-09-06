@@ -55,6 +55,18 @@ ElectricRow / ElectricValue
 
 ## Fetch-Backed Collection
 
+Create the container with the runtime's metadata schema as well as your app models:
+
+```swift
+let schema = Schema(SwiftDataCollectionSchema.models(including: [Todo.self]))
+let container = try ModelContainer(for: schema)
+```
+
+For Electric, include `ElectricShapeMetadata.self` in the application model list
+too. The helper registers private write-coordination metadata; UI continues to
+query `Todo` directly. Collection registration throws if required metadata is
+missing from the supplied container.
+
 ```swift
 import FetchSwiftDataCollection
 import SwiftDataCollection
@@ -205,7 +217,61 @@ When the monitor reports online again, failed transactions are made eligible imm
 
 Handlers are at-least-once: a transaction can be replayed after process restart, reconnect, or retry. Use stable transaction IDs or idempotency keys with your backend when a mutation endpoint is not naturally idempotent.
 
-Throw `CollectionNonRetriableError` from a handler for permanent application failures such as validation, authorization, or unrecoverable conflict errors. The transaction and mutations are marked conflicted instead of being retried, and the affected row remains in `syncError`.
+Throw `CollectionNonRetriableError` from a handler for permanent application failures such as validation, authorization, or unrecoverable conflict errors. The transaction and mutations are marked conflicted instead of being retried, and an existing affected row shows `.conflicted`. Retryable failures show `.error`.
+
+## Inspecting And Discarding Conflicts
+
+Conflicts are durable dispatch groups. A single transaction forms its own group;
+compatible never-submitted transactions may be compacted into one request and
+then share a conflict ID. A parked conflict blocks later dispatch on its keys;
+unrelated keys continue.
+
+```swift
+let conflicts = try await todos.conflicts()
+for conflict in conflicts where conflict.repairReadiness == .ready {
+    // Call this after the application decides to abandon the local intent.
+    try await todos.discard(conflict.id)
+}
+
+let updates = await todos.conflictUpdates
+for try await snapshot in updates {
+    // Display diagnostics; continue reading actual Todo rows with @Query.
+    showConflicts(snapshot)
+}
+```
+
+Each subscription begins with the current snapshot. Entries associate a key and
+operation with local changes and baseline evidence. Unknown evidence makes
+discard unavailable until authoritative data establishes a safe baseline.
+Conflicts remain inspectable even when the server deleted the affected row.
+
+Discard atomically removes a group's intent, rebuilds the affected SwiftData rows,
+and repairs never-submitted successor representations. It does not undo writes
+already accepted by the backend. Transaction waiters that failed remain failed.
+
+Handlers may read `modified`, but its unchanged fields can be rebuilt before
+first submission after an earlier intent is discarded. Submitted request bodies
+and compacted group membership remain stable across automatic retries. Use
+`context.transaction.id` as the backend idempotency key.
+
+Immediate completion accepts the submitted representation without observing a
+server-transformed row. For generated or normalized server values, use Electric
+txid confirmation or the Fetch adapter's authoritative refresh. An update over
+authoritative absence is not implicitly an insert.
+
+## Upgrading To v0.2.0
+
+This release requires an explicit source and schema migration. Replace
+`.syncError` with `.error`, and `.awaitingSync` with `.awaiting`; the persisted
+raw values change to `error` and `awaiting` respectively.
+Register metadata through `SwiftDataCollectionSchema.models(including:)`.
+Transparent migration of older dirty outboxes is not supported: older stores may
+lack both authoritative bases and compacted request membership.
+
+Applications own the transition. Drain or export pending/staged local work before
+replacing a store, or implement an application-specific migration. Never discard
+unsent user work as an incidental schema upgrade. The package does not delete or
+reset an existing store automatically.
 
 ## Model Requirements
 

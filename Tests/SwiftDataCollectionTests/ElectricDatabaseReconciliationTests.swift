@@ -25,7 +25,7 @@ struct ElectricDatabaseReconciliationTests {
         }
         let initialStatus = await transaction.status
         switch initialStatus {
-        case .durablyQueued, .sending, .awaitingSync:
+        case .durablyQueued, .sending, .awaiting:
             #expect(Bool(true))
         case .completed, .failed:
             Issue.record("Expected transaction to still be in progress before txid reconciliation")
@@ -33,7 +33,7 @@ struct ElectricDatabaseReconciliationTests {
 
         let context = ModelContext(container)
         let pendingBefore = try #require(context.fetch(FetchDescriptor<ElectricPendingMutation>()).first)
-        #expect(pendingBefore.status == .awaitingSync)
+        #expect(pendingBefore.status == .awaiting)
 
         async let waitForCompletion: Void = transaction.wait()
 
@@ -133,7 +133,7 @@ struct ElectricDatabaseReconciliationTests {
 
         let context = ModelContext(container)
         let todo = try #require(context.fetch(testTodoIdentifier.fetchDescriptor(for: "todo-1")).first)
-        #expect(todo.collectionSyncState == .syncError)
+        #expect(todo.collectionSyncState == .error)
 
         let pending = try #require(context.fetch(FetchDescriptor<ElectricPendingMutation>()).first)
         #expect(pending.status == .failed)
@@ -187,14 +187,14 @@ struct ElectricDatabaseReconciliationTests {
         let deadline = Date().addingTimeInterval(1)
         while Date() < deadline {
             let pending = try context.fetch(FetchDescriptor<ElectricPendingMutation>())
-            if pending.first?.status == .awaitingSync {
+            if pending.first?.status == .awaiting {
                 break
             }
             try await Task.sleep(nanoseconds: 20_000_000)
         }
 
         let retriedMutation = try #require(context.fetch(FetchDescriptor<ElectricPendingMutation>()).first)
-        #expect(retriedMutation.status == .awaitingSync)
+        #expect(retriedMutation.status == .awaiting)
         let retriedRow = try #require(context.fetch(testTodoIdentifier.fetchDescriptor(for: "todo-1")).first)
         #expect(retriedRow.collectionSyncState == .pendingCreate)
 
@@ -460,7 +460,7 @@ struct ElectricDatabaseReconciliationTests {
         #expect(visibleRow.collectionPendingMutationCount == 1)
 
         let pendingBefore = try #require(context.fetch(FetchDescriptor<ElectricPendingMutation>()).first)
-        #expect(pendingBefore.status == .awaitingSync)
+        #expect(pendingBefore.status == .awaiting)
         #expect(pendingBefore.operation == .delete)
 
         async let waitForCompletion: Void = transaction.wait()
@@ -527,7 +527,7 @@ struct ElectricDatabaseReconciliationTests {
 
         let context = ModelContext(container)
         let todo = try #require(context.fetch(testTodoIdentifier.fetchDescriptor(for: "todo-1")).first)
-        #expect(todo.collectionSyncState == .syncError)
+        #expect(todo.collectionSyncState == .error)
         #expect(todo.collectionPendingMutationCount == 1)
 
         let pending = try #require(context.fetch(FetchDescriptor<ElectricPendingMutation>()).first)
@@ -627,7 +627,7 @@ struct ElectricDatabaseReconciliationTests {
             .handlerInvoked,
             .handlerReturned,
             .awaitedTokensRegistered,
-            .awaitingSync,
+            .awaiting,
             .transactionCompleted,
         ])
 
@@ -635,7 +635,7 @@ struct ElectricDatabaseReconciliationTests {
         #expect(batchEvent.observedTXIDs == [101])
         #expect(batchEvent.offset == "4_0")
 
-        let awaited = try #require(events.first(where: { $0.kind == .awaitingSync }))
+        let awaited = try #require(events.first(where: { $0.kind == .awaiting }))
         #expect(awaited.awaitedTXIDs == [101])
 
         let registered = try #require(events.first(where: { $0.kind == .awaitedTokensRegistered }))

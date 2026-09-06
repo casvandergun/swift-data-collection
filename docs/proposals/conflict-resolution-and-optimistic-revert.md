@@ -1,12 +1,13 @@
 # Conflict repair: final design decision
 
-Status: selected design. The initial shared adapter classification correction is
-implemented, preserving the existing syncError mapping. Coordinated conflict
-repair and the schema changes below are not implemented.
+Status: implemented for the unreleased `v0.2.0`. The shared classification,
+coordinated materialization, schema changes, and conflict inspection/discard
+surface described below now ship together in the release branch.
 Reviewed against `a07065bf654b`. Target: `v0.2.0` for conflict repair and its
-schema/handler-contract changes, alongside the current hardening work. Implement
-the independently testable adapter classification correction first; all repair
-and migration gates below remain required before the combined release.
+schema/handler-contract changes, alongside the current hardening work. The
+independently testable adapter classification correction landed first; the
+remaining repair and migration gates are now implemented in the same release
+scope.
 
 ## Fit with the package
 
@@ -33,8 +34,9 @@ semantics for outbound application writes.
 
 - Transactions already persist `sequenceNumber`. The queue orders transactions
   by that number, with `createdAt` as a tie-breaker, and allocates max + 1.
-  Mutation enumeration still sorts by date. The defect is inconsistent ordering,
-  not the absence of durable transaction order.
+  Mutation enumeration now uses a persisted within-transaction ordinal, with
+  date and UUID only as legacy tie-breakers. The defect was inconsistent
+  ordering, not the absence of durable transaction order.
 - `originalRow` snapshots the visible row at record time, including earlier
   optimistic changes. It cannot establish an authoritative base.
 - Recomputing a successor from an overlay that still includes a parked conflict
@@ -195,7 +197,7 @@ Centralize these classifications in the core and remove adapter copies:
 
 | State | Requires resolution | Participates in overlay | Blocks same-key successor dispatch |
 |---|---|---|---|
-| pending, sending, awaitingSync, failed | yes | yes | yes |
+| pending, sending, awaiting, failed | yes | yes | yes |
 | conflicted | yes | yes | yes |
 | resolved or discarded | no | no | no |
 
@@ -204,11 +206,10 @@ Blocking is per key; unrelated keys continue. A multi-key transaction waits for
 every predecessor affecting its keys. Automated resolution can remove a blockage;
 there is no requirement that a human always intervene.
 
-Row-state precedence: conflicted, retryable syncError, pendingDelete,
+Row-state precedence: conflicted, retryable error, pendingDelete,
 pendingCreate, pendingUpdate, synced. Missing rows have no row state; group
-inspection carries their conflict. Keep the v0.2.0 classification fix's existing
-syncError mapping for that initial step; introduce the distinct conflicted mapping
-in the later coordinated repair step of the same v0.2.0 release.
+inspection carries their conflict. `.error` and `.conflicted` are distinct in
+the completed v0.2.0 repair path.
 
 ## Public surface for the first release
 
@@ -240,33 +241,31 @@ reported as successful server completion.
 
 ## Migration and release gates
 
-Target the coordinated change at v0.2.0, with public schema-composition support
-that includes all required core metadata types. Consumers retain control of
-their application schema and versioned migration plan. Validate upgrades using
-real stores made by the previous package version.
+Target the coordinated change at v0.2.0 with an explicitly breaking schema and
+source migration, as approved by the maintainer. Consumers adopt the public
+schema-composition helper, replace `.syncError` with `.error`, and replace
+`.awaitingSync` with `.awaiting`; the persisted spellings also become `error`
+and `awaiting`, with no deprecated aliases. Transparent upgrades of legacy dirty
+outboxes are outside this release's supported contract.
 
-Legacy dirty keys have no trustworthy base in general. Mark their base unknown;
-do not bless the oldest originalRow or current optimistic row as authoritative.
-Preserve their intents and expose recovery-required status. Enable discard only
-after a complete authoritative row or authoritative absence is established.
-Offline migration therefore preserves data but may leave repair unavailable.
-
-Existing destructive compaction may also have lost group provenance. Do not guess
-group membership from timestamps. Preserve such work, mark it recovery-required,
-and require authoritative reconciliation before enabling conflict discard.
-No silent outbox clearing or destructive best-effort migration is permitted.
+Applications own the transition: drain/export old local work before replacing a
+store, or supply their own explicit migration. The package never silently deletes
+an existing store or pretends legacy snapshots establish authoritative evidence.
+Schema validation rejects missing runtime metadata before starting collections.
+Unknown baselines remain necessary for interrupted resets and incomplete server
+evidence, and continue to prevent unsafe discard.
 
 Implementation gates:
 
 1. Completed: centralized adapter overlay classification with regression tests;
    see CHANGELOG for the implementation record.
-2. v0.2.0: schema registration, migration fixtures, ordering, base states, and
-   durable group/request representation.
-3. Core transition module integrated with Electric, Fetch, immediate completion,
-   staged promotion, resets, and restart.
-4. Conflict snapshots, discard, and distinct row conflict state.
-5. Migration and failure-injection evidence before release; publish changes and
-   consumer upgrade guidance in CHANGELOG/README as implementation lands.
+2. Completed: schema registration, ordering, base states, and durable
+   group/request representation.
+3. Completed: core transition module integration with Electric, Fetch, immediate
+   completion, staged promotion, resets, and restart.
+4. Completed: conflict snapshots, discard, and distinct row conflict state.
+5. Completed: hard-migration guidance and failure-injection coverage, recorded in
+   CHANGELOG and README.
 
 ## Required validation
 
@@ -288,8 +287,8 @@ Implementation gates:
   missing-row policies preserve base validity and completion semantics.
 - Staged promotion/resolution and base cleanup preserve their lifecycle.
 - Restart restores conflicted groups and independent snapshot subscribers.
-- Legacy dirty stores remain readable with no invented bases or compaction
-  membership; unsupported repair fails explicitly.
+- Older schemas are rejected explicitly. v0.2.0 does not infer bases or
+  compaction membership for legacy dirty stores.
 
 ## Separate follow-up: conflict detection
 
