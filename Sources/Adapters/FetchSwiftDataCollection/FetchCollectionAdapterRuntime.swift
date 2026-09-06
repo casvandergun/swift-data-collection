@@ -295,14 +295,7 @@ struct FetchCollectionSnapshotApplier<
     ) -> [String: [PendingCollectionMutation]] {
         let mutations = ((try? context.fetch(FetchDescriptor<PendingCollectionMutation>())) ?? [])
             .filter { $0.modelName == modelName }
-            .filter { mutation in
-                switch mutation.status {
-                case .pending, .sending, .awaitingSync, .failed:
-                    return true
-                case .resolved, .conflicted:
-                    return false
-                }
-            }
+            .filter { $0.status.participatesInReconciliationOverlay }
 
         return Dictionary(grouping: mutations, by: \.targetKey)
     }
@@ -314,7 +307,7 @@ struct FetchCollectionSnapshotApplier<
         model.collectionPendingMutationCount = pending.count
         if pending.isEmpty {
             model.collectionSyncState = .synced
-        } else if pending.contains(where: { $0.status == .failed }) {
+        } else if pending.contains(where: { $0.status.requiresSyncErrorState }) {
             model.collectionSyncState = .syncError
         } else if pending.contains(where: { $0.operation == .delete }) {
             model.collectionSyncState = .pendingDelete

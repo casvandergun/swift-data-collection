@@ -447,14 +447,7 @@ struct CollectionMutationReconciler {
     ) -> [PendingCollectionMutation] {
         ((try? context.fetch(FetchDescriptor<PendingCollectionMutation>())) ?? [])
             .filter { $0.modelName == modelName && $0.targetKey == targetKey }
-            .filter { mutation in
-                switch mutation.status {
-                case .pending, .sending, .awaitingSync, .failed, .conflicted:
-                    return true
-                case .resolved:
-                    return false
-                }
-            }
+            .filter { $0.status.participatesInReconciliationOverlay }
             .sorted { $0.createdAt < $1.createdAt }
     }
 
@@ -475,7 +468,7 @@ struct CollectionMutationReconciler {
             if existing.collectionSyncState != .stagedCreate {
                 existing.collectionSyncState = .synced
             }
-        } else if pending.contains(where: { $0.status == .failed || $0.status == .conflicted }) {
+        } else if pending.contains(where: { $0.status.requiresSyncErrorState }) {
             existing.collectionSyncState = .syncError
         } else if pending.contains(where: { $0.operation == .delete }) {
             existing.collectionSyncState = .pendingDelete

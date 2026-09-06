@@ -23,7 +23,7 @@ The Electric adapter contains the old read-side SwiftData sync pieces, so there 
 
 ### Release Goal
 
-Ship the offline transaction hardening already on `main` and decide the next scheduling API boundary.
+Ship the offline transaction hardening already on `main` together with coordinated conflict inspection and repair, including its schema migration and consumer upgrade guidance. Decide the next scheduling API boundary.
 
 ### Included From Current `main`
 
@@ -78,9 +78,9 @@ Do not use `v0.1.3` for the current offline connectivity work unless the release
 
 ### Retry And Outbox Operations
 
-- Add a `beforeRetry`-style hook so apps can filter, drop, or annotate loaded transactions before replay.
-- Add durable outbox cleanup and retention policy for resolved/conflicted transactions and mutations.
-- Consider public outbox administration APIs such as `peekOutbox`, `removeFromOutbox`, and `clearOutbox` if they fit SwiftData-first usage.
+- Scope a `beforeRetry`-style hook against the v0.2.0 repair and frozen-request contracts. Dropping work must use materialization; already-submitted request bodies must remain stable.
+- Scope durable retention for resolved/discarded delivery records. Conflicted work requires explicit resolution; age alone must not delete unresolved intent or its base.
+- Use the v0.2.0 conflict inspection/discard interface as the first outbox administration surface. Defer generic removal/clear operations until they can share its atomic repair path.
 
 ### Diagnostics And Status
 
@@ -94,7 +94,34 @@ Do not use `v0.1.3` for the current offline connectivity work unless the release
 - Thread `ElectricCollectionSyncUtilities` through richer handler contexts if the public API needs it, while keeping Electric-specific utilities out of `SwiftDataCollection`.
 - Define revision or ordering-evidence semantics before considering a general authoritative direct-write API.
 
+## v0.2.0 Planned Scope — Conflict Inspection And Repair
+
+### Release Goal
+
+Complete the permanent-refusal path with durable conflict inspection and atomic discard, preserving SwiftData as the only reactive row/query surface. The selected design is in [Conflict repair](docs/proposals/conflict-resolution-and-optimistic-revert.md). These are planned changes, not capabilities already present on main.
+
+- Add private per-dirty-key base metadata with known-row, known-absence, and unknown states; retain it only while intent requires resolution.
+- Centralize base advancement, ordered overlays, successor representation repair, and row-state derivation in a backend-neutral materialization module shared by Electric and Fetch.
+- Reuse persisted transaction `sequenceNumber` consistently for overlays; add atomic allocation from a durable collection counter and deterministic within-transaction ordering where needed.
+- Preserve recoverable optimistic deletes and staged-row semantics; handle immediate acceptance, Electric observation/checkpoints, Fetch completion, and reset/refetch explicitly.
+- Persist compacted dispatch identity, membership, and frozen submitted requests without overwriting source intent. Preserve request bodies and membership across automatic retries.
+- Block same-key successors behind unresolved conflicts, while unrelated keys continue. Repair never-submitted successor representations on discard.
+- Expose conflict group snapshots, independent update streams, and atomic group discard; use `.conflicted` for permanent refusals and `.syncError` for retryable failures.
+- Provide schema composition and consumer upgrade guidance. Validate real-store migrations; legacy bases or compaction membership that cannot be recovered remain explicitly unknown/recovery-required, with destructive repair unavailable until authoritative recovery.
+
+### Release Gates And Deferred Surface
+
+- Verify atomic multi-key failure handling, restart, migration, adapter evidence ordering, soft deletes, and stable retries before release.
+- Keep manual conflict retry, automatic/custom resolution policies, amend/merge execution, and general outbox deletion deferred until their contracts are justified by concrete consumers.
+- Record implemented behavior in CHANGELOG and update README migration instructions as implementation lands. Do not advertise planned repair as available.
+
 ## Backlog
+
+### Concurrent-Edit Detection
+
+- Scope backend-neutral expected-version/conditional-write semantics with concrete application cases, including how handlers report rejection and adapters provide authoritative evidence.
+- Keep this distinct from v0.2.0 refusal repair. The package currently does not detect concurrent edits, and Electric patches do not determine the application's outbound conflict policy.
+- Define merge/rebase behavior only after version and evidence contracts exist; reuse conflict inspection and repair where appropriate.
 
 ### Snapshot And Subset APIs
 
@@ -128,6 +155,8 @@ The TypeScript and TanStack references remain behavioral references, not impleme
 - a second optimistic row store layered over SwiftData
 - browser-specific storage and coordination assumptions
 - TypeScript-style utility bags when typed Swift facades are clearer
+
+Private base metadata retained only for unresolved keys is permitted as write-coordination state. It must not expose a collection read/query interface or grow into a general row cache; base, outbox, and visible-row transitions must commit atomically.
 
 ### Current TanStack Offline-Transaction Diffs
 

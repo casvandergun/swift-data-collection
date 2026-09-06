@@ -366,6 +366,66 @@ struct FetchSwiftDataCollectionTests {
         #expect(todo.collectionPendingMutationCount == 1)
     }
 
+    @Test("Fetched row preserves conflicted mutation local state")
+    func fetchedRowPreservesConflictedMutationLocalState() throws {
+        let container = try makeTestContainer()
+        let context = ModelContext(container)
+        let local = TestTodo(id: "todo-1", projectID: "project-a", title: "Local")
+        local.collectionSyncState = .syncError
+        local.collectionPendingMutationCount = 1
+        context.insert(local)
+        context.insert(
+            try testPendingMutation(
+                key: "todo-1",
+                operation: .update,
+                payload: testTodoCollectionRow(id: "todo-1", projectID: "project-a", title: "Local"),
+                changedFields: ["title"],
+                status: .conflicted
+            )
+        )
+        try context.save()
+
+        _ = try makeTestFetchApplier().apply(
+            [
+                testTodoCollectionRow(id: "todo-1", projectID: "server-project", title: "Server"),
+            ],
+            in: context
+        )
+
+        let todo = try #require(context.fetch(testTodoIdentifier.fetchDescriptor(for: "todo-1")).first)
+        #expect(todo.title == "Local")
+        #expect(todo.projectID == "server-project")
+        #expect(todo.collectionSyncState == .syncError)
+        #expect(todo.collectionPendingMutationCount == 1)
+    }
+
+    @Test("Missing fetched row preserves a row with a conflicted mutation")
+    func missingFetchedRowPreservesConflictedRow() throws {
+        let container = try makeTestContainer()
+        let context = ModelContext(container)
+        let local = TestTodo(id: "todo-1", projectID: "project-a", title: "Local")
+        local.collectionSyncState = .syncError
+        local.collectionPendingMutationCount = 1
+        context.insert(local)
+        context.insert(
+            try testPendingMutation(
+                key: "todo-1",
+                operation: .update,
+                payload: testTodoCollectionRow(id: "todo-1", projectID: "project-a", title: "Local"),
+                changedFields: ["title"],
+                status: .conflicted
+            )
+        )
+        try context.save()
+
+        _ = try makeTestFetchApplier().apply([], in: context)
+
+        let preserved = try #require(context.fetch(testTodoIdentifier.fetchDescriptor(for: "todo-1")).first)
+        #expect(preserved.title == "Local")
+        #expect(preserved.collectionSyncState == .syncError)
+        #expect(preserved.collectionPendingMutationCount == 1)
+    }
+
     @Test("Repeated identical refreshes are idempotent")
     func repeatedIdenticalRefreshesAreIdempotent() async throws {
         let rows = TestFetchRows([

@@ -202,6 +202,104 @@ struct ElectricSwiftDataBatchApplicationTests {
         #expect(updated.collectionSyncState == .pendingUpdate)
     }
 
+    @Test("Conflicted local fields remain protected during sync")
+    func protectsConflictedLocalFields() throws {
+        let container = try makeTestContainer()
+        let context = ModelContext(container)
+        let synchronizer = ElectricCollectionSynchronizer(identifier: testTodoIdentifier)
+
+        let todo = TestTodo(
+            collectionSyncState: .syncError,
+            collectionPendingMutationCount: 1,
+            id: "todo-1",
+            projectID: "project-a",
+            title: "Local Title"
+        )
+        context.insert(todo)
+        context.insert(
+            try makePendingMutation(
+                targetKey: "todo-1",
+                payload: testTodoRow(id: "todo-1", projectID: "project-a", title: "Local Title"),
+                changedFields: ["title"],
+                originalRow: testTodoRow(id: "todo-1", projectID: "project-a", title: "Server Title"),
+                status: .conflicted
+            )
+        )
+        try context.save()
+
+        _ = try synchronizer.apply(
+            ShapeBatch(
+                messages: [
+                    ElectricMessage(
+                        key: "\"public\".\"todos\"/todo-1",
+                        value: [
+                            "projectID": .string("project-b"),
+                            "title": .string("New Server Title"),
+                        ],
+                        headers: .init(operation: .update)
+                    ),
+                ],
+                state: testShapeState(offset: "6_0"),
+                schema: [:],
+                reachedUpToDate: false
+            ),
+            shapeID: "todos",
+            in: context
+        )
+
+        let updated = try #require(context.fetch(testTodoIdentifier.fetchDescriptor(for: "todo-1")).first)
+        #expect(updated.title == "Local Title")
+        #expect(updated.projectID == "project-b")
+        #expect(updated.collectionSyncState == .syncError)
+        #expect(updated.collectionPendingMutationCount == 1)
+    }
+
+    @Test("Authoritative delete preserves a row with a conflicted mutation")
+    func authoritativeDeletePreservesConflictedRow() throws {
+        let container = try makeTestContainer()
+        let context = ModelContext(container)
+        let synchronizer = ElectricCollectionSynchronizer(identifier: testTodoIdentifier)
+
+        let todo = TestTodo(
+            collectionSyncState: .syncError,
+            collectionPendingMutationCount: 1,
+            id: "todo-1",
+            projectID: "project-a",
+            title: "Local Title"
+        )
+        context.insert(todo)
+        context.insert(
+            try makePendingMutation(
+                targetKey: "todo-1",
+                payload: testTodoRow(id: "todo-1", projectID: "project-a", title: "Local Title"),
+                changedFields: ["title"],
+                status: .conflicted
+            )
+        )
+        try context.save()
+
+        _ = try synchronizer.apply(
+            ShapeBatch(
+                messages: [
+                    ElectricMessage(
+                        key: "\"public\".\"todos\"/todo-1",
+                        headers: .init(operation: .delete)
+                    ),
+                ],
+                state: testShapeState(offset: "7_0"),
+                schema: [:],
+                reachedUpToDate: false
+            ),
+            shapeID: "todos",
+            in: context
+        )
+
+        let preserved = try #require(context.fetch(testTodoIdentifier.fetchDescriptor(for: "todo-1")).first)
+        #expect(preserved.title == "Local Title")
+        #expect(preserved.collectionSyncState == .syncError)
+        #expect(preserved.collectionPendingMutationCount == 1)
+    }
+
     @Test("Collection synchronizer uses CollectionSchema for inbound normalization")
     func collectionSynchronizerUsesCollectionSchemaForInboundNormalization() throws {
         let container = try makeTestContainer()

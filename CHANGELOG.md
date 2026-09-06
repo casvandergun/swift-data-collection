@@ -4,6 +4,8 @@ All notable package changes are tracked here by release.
 
 ## Unreleased - target v0.2.0
 
+- Corrected Electric and Fetch reconciliation so conflicted mutations remain part of the local overlay when authoritative data arrives, preserving local intent and the existing `syncError` row state.
+- Recorded the conflict-repair design within the combined v0.2.0 release scope, covering private base metadata, schema migration, stable compacted delivery groups, conflict inspection, and atomic discard. These are design/release-plan changes only; coordinated conflict repair is not implemented. Tracked concurrent-edit detection separately.
 - Added durable `.stagedCreate` rows with collection APIs to stage, locally update, publish, and discard existing SwiftData models without prematurely creating outbound mutations.
 - Added per-managed-collection write serialization across coordinator commits, Electric batches, and Fetch snapshot application.
 - Added backend-neutral staged reconciliation so adapter upserts resolve staged rows while adapter deletes and resets preserve staged work.

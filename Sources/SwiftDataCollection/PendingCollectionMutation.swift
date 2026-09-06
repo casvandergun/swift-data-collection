@@ -14,6 +14,26 @@ public enum PendingMutationStatus: String, Sendable, Codable, Hashable {
     case resolved
     case failed
     case conflicted
+
+    /// Whether this mutation still contributes local intent during adapter reconciliation.
+    package var participatesInReconciliationOverlay: Bool {
+        switch self {
+        case .pending, .sending, .awaitingSync, .failed, .conflicted:
+            true
+        case .resolved:
+            false
+        }
+    }
+
+    /// Whether this mutation should surface the row's existing sync-error state.
+    package var requiresSyncErrorState: Bool {
+        switch self {
+        case .failed, .conflicted:
+            true
+        case .pending, .sending, .awaitingSync, .resolved:
+            false
+        }
+    }
 }
 
 @Model
