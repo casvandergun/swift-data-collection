@@ -72,7 +72,6 @@ package actor CollectionDispatchLane {
     private var isDraining = false
     private var drainRequestedAgain = false
     private var drainWaiters: [CheckedContinuation<Void, Never>] = []
-    private var attemptWaiters: [UUID: [CheckedContinuation<Void, Never>]] = [:]
     private var scheduledRetryAt: Date?
     private var scheduledRetryTask: Task<Void, Never>?
 
@@ -104,47 +103,6 @@ package actor CollectionDispatchLane {
         }
     }
 
-    /*
-     * Waiting for one transaction is not the same as waiting for the lane.
-     *
-     * A `.dispatchAttempted` write wants to know its own mutation reached a
-     * handler. The lane drains until it quiesces, so making that caller await
-     * the whole drain binds an interactive write to every transaction the store
-     * happens to be carrying -- including work queued after it, in collections
-     * it knows nothing about.
-     */
-    package func drain(untilAttempted transactionID: UUID) async {
-        await withCheckedContinuation { continuation in
-            attemptWaiters[transactionID, default: []].append(continuation)
-            Task { await self.drain() }
-        }
-    }
-
-    private func resumeAttemptWaiters(for transactionID: UUID) {
-        guard let waiters = attemptWaiters.removeValue(forKey: transactionID) else { return }
-        for waiter in waiters {
-            waiter.resume()
-        }
-    }
-
-    /// Resumes every waiter whose transaction has left the dispatchable set,
-    /// which covers members compacted into another transaction's request.
-    private func resumeAttemptWaitersAbsent(from entries: [Entry]) {
-        guard attemptWaiters.isEmpty == false else { return }
-        let present = Set(entries.map(\.id))
-        for id in attemptWaiters.keys where present.contains(id) == false {
-            resumeAttemptWaiters(for: id)
-        }
-    }
-
-    private func resumeAllAttemptWaiters() {
-        let waiters = attemptWaiters.values.flatMap { $0 }
-        attemptWaiters.removeAll()
-        for waiter in waiters {
-            waiter.resume()
-        }
-    }
-
     /// Drains the lane, and guarantees that work durably queued before this
     /// call has been given a dispatch attempt before it returns.
     ///
@@ -164,11 +122,6 @@ package actor CollectionDispatchLane {
             await runDrainPass()
         } while drainRequestedAgain
         isDraining = false
-
-        // Nothing further will be attempted in this drain, so a waiter still
-        // outstanding is either blocked behind a hold or not dispatchable at
-        // all. Either way it has its answer.
-        resumeAllAttemptWaiters()
 
         let waiters = drainWaiters
         drainWaiters.removeAll()
@@ -247,8 +200,6 @@ package actor CollectionDispatchLane {
             cancelScheduledRetry()
             switch await runtime.laneDispatch(transactionID: head.id) {
             case .dispatched:
-                resumeAttemptWaiters(for: head.id)
-                resumeAttemptWaitersAbsent(from: laneEntries())
                 steppedPast.removeAll()
             case .skipped:
                 trace(

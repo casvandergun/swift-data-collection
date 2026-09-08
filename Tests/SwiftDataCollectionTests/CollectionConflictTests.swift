@@ -270,10 +270,18 @@ struct CollectionConflictTests {
         let transaction = try await collection.insert {
             TestTodo(id: "todo-1", projectID: "project-a", title: "Local")
         }
+        await collection.flush()
 
+        // The handler is never reached, and the failure ends the drain rather
+        // than spinning inside it: each drain costs exactly one attempt.
+        let afterFirstDrain = saver.failureCount()
         #expect(await recorder.count() == 0)
-        #expect(saver.failureCount() == 1)
+        #expect(afterFirstDrain >= 1)
         #expect(await transaction.status == .failed("prepare save failed"))
+
+        await collection.flush()
+        #expect(saver.failureCount() == afterFirstDrain + 1)
+        #expect(await recorder.count() == 0)
 
         let context = ModelContext(container)
         let persisted = try #require(context.fetch(FetchDescriptor<PendingCollectionTransaction>()).first)

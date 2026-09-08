@@ -23,6 +23,7 @@ struct ElectricDatabaseReconciliationTests {
         let transaction = try await collection.insert {
             TestTodo(id: "todo-1", projectID: "project-a", title: "Inserted")
         }
+        await collection.flush()
         let initialStatus = await transaction.status
         switch initialStatus {
         case .queued, .sending, .awaiting, .retrying:
@@ -446,6 +447,7 @@ struct ElectricDatabaseReconciliationTests {
         )
 
         let transaction = try await collection.delete("todo-1")
+        await collection.flush()
         let context = ModelContext(container)
         let visibleRow = try #require(context.fetch(testTodoIdentifier.fetchDescriptor(for: "todo-1")).first)
         #expect(visibleRow.collectionSyncState == .pendingDelete)
@@ -574,6 +576,7 @@ struct ElectricDatabaseReconciliationTests {
         let transaction = try await collection.insert {
             TestTodo(id: "todo-1", projectID: "project-a", title: "Inserted")
         }
+        await collection.flush()
 
         let context = ModelContext(container)
         let batch = ShapeBatch(
@@ -661,6 +664,7 @@ struct ElectricDatabaseReconciliationTests {
         let transaction = try await collection.insert {
             TestTodo(id: "todo-1", projectID: "project-a", title: "Inserted")
         }
+        await collection.flush()
         let transactionID = await transaction.id
 
         let events = recorder.events.filter { $0.transactionID == transactionID }
@@ -699,6 +703,7 @@ struct ElectricDatabaseReconciliationTests {
         _ = try await collection.insert {
             TestTodo(id: "todo-1", projectID: "project-a", title: "Inserted")
         }
+        await collection.flush()
 
         let optimisticEvents = recorder.events.filter {
             $0.category == "CollectionTrace"

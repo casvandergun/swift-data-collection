@@ -661,12 +661,7 @@ actor CollectionCoordinator<
                 pendingMutationCount: preparedTransaction.mutations.count,
                 message: "enqueued transaction for dispatch"
             )
-            switch configuration.dispatchWait {
-            case .durablyQueued:
-                enqueueDispatchWithoutWaiting()
-            case .dispatchAttempted:
-                await enqueueDispatch(transactionID: liveTransaction.id)
-            }
+            enqueueDispatchWithoutWaiting()
             return liveTransaction
         } catch {
             liveTransactions.removeValue(forKey: liveTransaction.id)
@@ -805,11 +800,6 @@ actor CollectionCoordinator<
      * round trip await `CollectionTransaction.wait()`; tests force it with
      * `flush()`.
      */
-    private func enqueueDispatch(transactionID: UUID) async {
-        guard await laneIsAcceptingDispatch() else { return }
-        await dispatchLane.drain(untilAttempted: transactionID)
-    }
-
     private func enqueueDispatchWithoutWaiting() {
         Task { await self.drainDispatchIfNeeded() }
     }

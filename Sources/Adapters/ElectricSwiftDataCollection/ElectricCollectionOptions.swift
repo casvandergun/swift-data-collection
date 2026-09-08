@@ -33,7 +33,6 @@ public struct ElectricCollectionOptions<Model: SwiftDataCollectionModel, ID: Has
     public let extraParameters: [String: String]
     public let utilities: ElectricCollectionSyncUtilities
     public let onApply: CollectionApplyHandler?
-    public let dispatchWait: CollectionDispatchWait
     public let onInsert: ElectricMutationHandler<Model, ID>?
     public let onUpdate: ElectricMutationHandler<Model, ID>?
     public let onDelete: ElectricMutationHandler<Model, ID>?
@@ -53,7 +52,6 @@ public struct ElectricCollectionOptions<Model: SwiftDataCollectionModel, ID: Has
         extraParameters: [String: String] = [:],
         utilities: ElectricCollectionSyncUtilities = ElectricCollectionSyncUtilities(),
         onApply: CollectionApplyHandler? = nil,
-        dispatchWait: CollectionDispatchWait = .dispatchAttempted,
         onInsert: ElectricMutationHandler<Model, ID>? = nil,
         onUpdate: ElectricMutationHandler<Model, ID>? = nil,
         onDelete: ElectricMutationHandler<Model, ID>? = nil
@@ -77,7 +75,6 @@ public struct ElectricCollectionOptions<Model: SwiftDataCollectionModel, ID: Has
         self.extraParameters = extraParameters
         self.utilities = utilities
         self.onApply = onApply
-        self.dispatchWait = dispatchWait
         self.onInsert = onInsert
         self.onUpdate = onUpdate
         self.onDelete = onDelete
@@ -105,7 +102,6 @@ public struct ElectricCollectionOptions<Model: SwiftDataCollectionModel, ID: Has
             modelName: modelName,
             adapter: adapter,
             onApply: onApply,
-            dispatchWait: dispatchWait,
             onInsert: Self.wrap(onInsert),
             onUpdate: Self.wrap(onUpdate),
             onDelete: Self.wrap(onDelete)
@@ -158,7 +154,6 @@ public func electricCollectionOptions<Model: SwiftDataCollectionModel, ID: Hasha
     extraParameters: [String: String] = [:],
     utilities: ElectricCollectionSyncUtilities = ElectricCollectionSyncUtilities(),
     onApply: CollectionApplyHandler? = nil,
-    dispatchWait: CollectionDispatchWait = .dispatchAttempted,
     onInsert: ElectricMutationHandler<Model, ID>? = nil,
     onUpdate: ElectricMutationHandler<Model, ID>? = nil,
     onDelete: ElectricMutationHandler<Model, ID>? = nil
@@ -177,7 +172,6 @@ public func electricCollectionOptions<Model: SwiftDataCollectionModel, ID: Hasha
         extraParameters: extraParameters,
         utilities: utilities,
         onApply: onApply,
-        dispatchWait: dispatchWait,
         onInsert: onInsert,
         onUpdate: onUpdate,
         onDelete: onDelete

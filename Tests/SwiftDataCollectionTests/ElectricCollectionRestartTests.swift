@@ -422,9 +422,11 @@ struct ElectricCollectionRestartTests {
         _ = try await collection.insert {
             TestTodo(id: "todo-1", projectID: "project-a", title: "First")
         }
+        await collection.flush()
         _ = try await collection.insert {
             TestTodo(id: "todo-2", projectID: "project-a", title: "Second")
         }
+        await collection.flush()
 
         let pendingContext = ModelContext(container)
         let transactions = try pendingContext.fetch(FetchDescriptor<ElectricPendingTransaction>())

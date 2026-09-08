@@ -32,7 +32,6 @@ struct CollectionTransactionWaitTests {
             TestTodo.self,
             identifier: testTodoIdentifier,
             table: "todos",
-            dispatchWait: .durablyQueued,
             onInsert: { _ in
                 if await attempts.recordAndDecide() {
                     throw TransientError()
@@ -66,7 +65,6 @@ struct CollectionTransactionWaitTests {
             TestTodo.self,
             identifier: testTodoIdentifier,
             table: "todos",
-            dispatchWait: .durablyQueued,
             onInsert: { _ in
                 throw CollectionNonRetriableError("validation failed", disposition: .quarantine)
             }
@@ -92,7 +90,6 @@ struct CollectionTransactionWaitTests {
             TestTodo.self,
             identifier: testTodoIdentifier,
             table: "todos",
-            dispatchWait: .durablyQueued,
             onInsert: { _ in
                 await gate.hold()
                 return .immediate

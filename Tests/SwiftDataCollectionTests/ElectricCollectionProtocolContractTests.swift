@@ -46,6 +46,7 @@ struct ElectricCollectionProtocolContractTests {
         let transaction = try await collection.update("todo-1") { todo in
             todo.title = "Local optimistic title"
         }
+        await collection.flush()
 
         let pendingBefore = try #require(context.fetch(FetchDescriptor<ElectricPendingMutation>()).first)
         #expect(pendingBefore.status == .awaiting)
@@ -138,6 +139,7 @@ struct ElectricCollectionProtocolContractTests {
         let transaction = try await collection.insert {
             TestTodo(id: "todo-1", projectID: "project-a", title: "Inserted")
         }
+        await collection.flush()
 
         let context = ModelContext(container)
         let firstBatch = testTodoBatch(

@@ -13,13 +13,13 @@ The package is intentionally split into two deliverables:
 
 Latest released version: `v0.1.2`.
 
-`main` contains unreleased `v0.2.0`-targeted hardening work: durable staged inserts, serialized managed writes, retry bounds, network-aware offline pause/resume, reconnect retry reset, and coordinated permanent-refusal inspection and repair.
+`main` contains unreleased `v0.3.0`-targeted hardening work: durable staged inserts, serialized managed writes, retry bounds, network-aware offline pause/resume, reconnect retry reset, and coordinated permanent-refusal inspection and repair.
 
 The collection path is restart-grade and offline-aware. Transaction durability is transaction-first on disk, optimistic deletes are recoverable, retry/replay is autonomous, network loss pauses outbound dispatch, reconnect resumes eligible work, one managed shape or collection per model type is enforced, and the release-grade evidence bar is in place.
 
 The Electric adapter contains the old read-side SwiftData sync pieces, so there is no separate `ElectricSwiftData` module in this package.
 
-## v0.2.0
+## v0.3.0
 
 ### Release Goal
 
@@ -36,23 +36,17 @@ Ship the offline transaction hardening already on `main` together with coordinat
 - Durable `.stagedCreate` rows with stage, local update, publish, and discard operations.
 - Store-wide serialization of managed coordinator and adapter SwiftData writes, so transaction-sequence allocation and the commit that consumes it share one critical section.
 - Adapter-driven resolution of staged rows, with staged work preserved during deletes and resets.
-- Per-collection `CollectionDispatchWait`, defaulting to the existing `.dispatchAttempted` behaviour, plus a public `flush()` for explicit drains.
+- A single write-return contract: mutations return once durably queued, with `flush()` for explicit drains and `CollectionTransaction.wait()` for the final outcome. `CollectionDispatchWait` is removed.
 - Private per-dirty-key authoritative evidence and deterministic overlay materialization shared by the coordinator, Electric, and Fetch without adding a UI read/query layer.
 - Monotonic transaction sequencing, stable compacted dispatch groups, frozen retry requests, and same-key conflict barriers.
 - Store-wide FIFO dispatch ordering across all collections, with a store-wide sequence allocator, a shared write gate, and a single retry timer. Resolves the cross-collection scheduling decision in favour of a store-level scheduler; explicit dependency lanes remain deferred.
 - Public conflict snapshots/update streams and atomic group discard with successor payload repair.
-- A schema-composition helper and startup validation for runtime metadata; v0.2.0 uses an explicit hard schema/source migration.
+- A schema-composition helper and startup validation for runtime metadata; v0.3.0 uses an explicit hard schema/source migration.
 - Distinct row states: `.error` for retryable failures and `.conflicted` for permanently refused intent.
 - Canonical Electric key normalization keeps backend UUID spelling differences from breaking row materialization or txid reconciliation.
 
 ### Planned Decisions
 
-- Remove `CollectionDispatchWait` in the next major version, making every mutation return once queued.
-  Decided: the configuration is at the wrong seam. It is static per collection, but when a call should
-  return is a property of the call -- a capture path and an interactive edit on the same model want
-  different answers. Deprecated now, removed next major; callers needing the outcome await
-  `CollectionTransaction.wait()`. For consumers already using `.durablyQueued` on capture collections,
-  migration is deleting the argument.
 - Do not add `waitForDispatch()` without a concrete caller that needs the midpoint -- a server that
   accepts a write well before the authoritative row reappears through sync. It exposes an internal
   scheduling phase, does not throw the dispatch failure, and callers wanting certainty need `wait()`
@@ -80,7 +74,7 @@ Appropriate `v0.1.3` work:
 
 Do not use `v0.1.3` for the current offline connectivity work unless the release strategy changes; that work is targeted at `v0.2.0`.
 
-## v0.2.x
+## v0.3.x
 
 ### Scheduling
 

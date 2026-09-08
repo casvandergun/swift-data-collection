@@ -270,16 +270,6 @@ public struct CollectionAdapter<
  * dispatch begins in both modes. Callers that still need the round trip await
  * `CollectionTransaction.wait()`, or drain the collection with `flush()`.
  */
-@available(
-    *,
-    deprecated,
-    message: "Waiting belongs at the call site, not on the collection: one static setting is always wrong for one of a collection's callers. Mutations will always return once queued; await CollectionTransaction.wait() where the final outcome is required."
-)
-public enum CollectionDispatchWait: String, Sendable, Hashable, Codable {
-    case dispatchAttempted
-    case durablyQueued
-}
-
 public struct CollectionOptions<
     Model: SwiftDataCollectionModel,
     ID: Hashable & Sendable
@@ -289,8 +279,6 @@ public struct CollectionOptions<
     public let identifier: CollectionModelIdentifier<Model, ID>
     public let adapter: CollectionAdapter<Model, ID>
     public let onApply: CollectionApplyHandler?
-    @available(*, deprecated, message: "Await CollectionTransaction.wait() at the call site instead.")
-    public let dispatchWait: CollectionDispatchWait
     package let onInsert: CollectionAdapterMutationHandler<Model, ID>?
     package let onUpdate: CollectionAdapterMutationHandler<Model, ID>?
     package let onDelete: CollectionAdapterMutationHandler<Model, ID>?
@@ -301,7 +289,6 @@ public struct CollectionOptions<
         modelName: String = String(reflecting: Model.self),
         adapter: CollectionAdapter<Model, ID>,
         onApply: CollectionApplyHandler? = nil,
-        dispatchWait: CollectionDispatchWait = .dispatchAttempted,
         onInsert: CollectionMutationHandler<Model, ID>? = nil,
         onUpdate: CollectionMutationHandler<Model, ID>? = nil,
         onDelete: CollectionMutationHandler<Model, ID>? = nil
@@ -312,7 +299,6 @@ public struct CollectionOptions<
             modelName: modelName,
             adapter: adapter,
             onApply: onApply,
-            dispatchWait: dispatchWait,
             onInsert: onInsert.map { handler in
                 { @Sendable context in
                     try await handler(context)
@@ -340,7 +326,6 @@ public struct CollectionOptions<
         modelName: String = String(reflecting: Model.self),
         adapter: CollectionAdapter<Model, ID>,
         onApply: CollectionApplyHandler? = nil,
-        dispatchWait: CollectionDispatchWait = .dispatchAttempted,
         onInsert: CollectionAdapterMutationHandler<Model, ID>? = nil,
         onUpdate: CollectionAdapterMutationHandler<Model, ID>? = nil,
         onDelete: CollectionAdapterMutationHandler<Model, ID>? = nil
@@ -350,7 +335,6 @@ public struct CollectionOptions<
         self.identifier = identifier
         self.adapter = adapter
         self.onApply = onApply
-        self.dispatchWait = dispatchWait
         self.onInsert = onInsert
         self.onUpdate = onUpdate
         self.onDelete = onDelete

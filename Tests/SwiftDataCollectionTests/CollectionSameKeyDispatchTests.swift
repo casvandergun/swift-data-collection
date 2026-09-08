@@ -171,9 +171,11 @@ struct CollectionSameKeyDispatchTests {
         _ = try await collection.insert {
             TestTodo(id: "todo-1", projectID: "project-a", title: "Draft")
         }
+        await collection.flush()
         _ = try await collection.update("todo-1") { todo in
             todo.title = "Finished"
         }
+        await collection.flush()
 
         let recorder = MutationRecorder()
         let reopenedContainer = try storeLocation.makeContainer()

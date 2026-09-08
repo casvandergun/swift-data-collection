@@ -108,6 +108,7 @@ struct CollectionConnectivityTests {
         _ = try await collection.insert {
             TestTodo(id: "todo-1", projectID: "project-a", title: "Retry insert")
         }
+        await collection.flush()
 
         #expect(await recorder.value() == 1)
         let failedContext = ModelContext(container)

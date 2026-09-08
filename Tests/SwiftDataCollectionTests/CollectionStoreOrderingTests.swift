@@ -51,7 +51,6 @@ struct CollectionStoreOrderingTests {
             TestTodo.self,
             identifier: testTodoIdentifier,
             table: "todos",
-            dispatchWait: .durablyQueued,
             onInsert: { _ in
                 await log.enter("parent")
                 return .immediate
@@ -61,7 +60,6 @@ struct CollectionStoreOrderingTests {
             TestEvent.self,
             identifier: testEventIdentifier,
             table: "events",
-            dispatchWait: .durablyQueued,
             onInsert: { _ in
                 await log.enter("child")
                 return .immediate
@@ -102,14 +100,12 @@ struct CollectionStoreOrderingTests {
             TestTodo.self,
             identifier: testTodoIdentifier,
             table: "todos",
-            dispatchWait: .durablyQueued,
             onInsert: { _ in .immediate }
         )
         let events = try await store.collection(
             TestEvent.self,
             identifier: testEventIdentifier,
             table: "events",
-            dispatchWait: .durablyQueued,
             onInsert: { _ in .immediate }
         )
 
@@ -149,7 +145,6 @@ struct CollectionStoreOrderingTests {
             TestTodo.self,
             identifier: testTodoIdentifier,
             table: "todos",
-            dispatchWait: .durablyQueued,
             onInsert: { _ in
                 await log.log("refused")
                 // Quarantine keeps the refusal in the outbox, which is the
@@ -164,7 +159,6 @@ struct CollectionStoreOrderingTests {
             TestEvent.self,
             identifier: testEventIdentifier,
             table: "events",
-            dispatchWait: .durablyQueued,
             onInsert: { _ in
                 await log.log("accepted")
                 return .immediate
@@ -207,7 +201,6 @@ struct CollectionStoreOrderingTests {
             TestTodo.self,
             identifier: testTodoIdentifier,
             table: "todos",
-            dispatchWait: .durablyQueued,
             onInsert: { _ in
                 await log.log("parent-attempt")
                 throw TestTransientError()
@@ -217,7 +210,6 @@ struct CollectionStoreOrderingTests {
             TestEvent.self,
             identifier: testEventIdentifier,
             table: "events",
-            dispatchWait: .durablyQueued,
             onInsert: { _ in
                 await log.log("child")
                 return .immediate
@@ -267,14 +259,12 @@ struct CollectionStoreOrderingTests {
                 TestTodo.self,
                 identifier: testTodoIdentifier,
                 table: "todos",
-                dispatchWait: .durablyQueued,
                 onInsert: { _ in .immediate }
             )
             let children = try await store.collection(
                 TestEvent.self,
                 identifier: testEventIdentifier,
                 table: "events",
-                dispatchWait: .durablyQueued,
                 onInsert: { _ in .immediate }
             )
             _ = try await parents.insert {
@@ -293,7 +283,6 @@ struct CollectionStoreOrderingTests {
             TestEvent.self,
             identifier: testEventIdentifier,
             table: "events",
-            dispatchWait: .durablyQueued,
             onInsert: { _ in
                 await log.log("child")
                 return .immediate
@@ -307,7 +296,6 @@ struct CollectionStoreOrderingTests {
             TestTodo.self,
             identifier: testTodoIdentifier,
             table: "todos",
-            dispatchWait: .durablyQueued,
             onInsert: { _ in
                 await log.log("parent")
                 return .immediate
@@ -336,7 +324,6 @@ struct CollectionStoreOrderingTests {
             TestTodo.self,
             identifier: testTodoIdentifier,
             table: "todos",
-            dispatchWait: .durablyQueued,
             onInsert: { _ in
                 await log.log("parent")
                 return .immediate
@@ -346,7 +333,6 @@ struct CollectionStoreOrderingTests {
             TestEvent.self,
             identifier: testEventIdentifier,
             table: "events",
-            dispatchWait: .durablyQueued,
             onInsert: { _ in
                 await log.log("child")
                 return .immediate
@@ -387,14 +373,12 @@ struct CollectionStoreOrderingTests {
                 TestTodo.self,
                 identifier: testTodoIdentifier,
                 table: "todos",
-                dispatchWait: .durablyQueued,
                 onInsert: { _ in .immediate }
             )
             let children = try await store.collection(
                 TestEvent.self,
                 identifier: testEventIdentifier,
                 table: "events",
-                dispatchWait: .durablyQueued,
                 onInsert: { _ in .immediate }
             )
             _ = try await parents.insert {
@@ -420,7 +404,6 @@ struct CollectionStoreOrderingTests {
             TestEvent.self,
             identifier: testEventIdentifier,
             table: "events",
-            dispatchWait: .durablyQueued,
             onInsert: { _ in
                 await log.log("child")
                 return .immediate
@@ -434,7 +417,6 @@ struct CollectionStoreOrderingTests {
             TestTodo.self,
             identifier: testTodoIdentifier,
             table: "todos",
-            dispatchWait: .durablyQueued,
             onInsert: { _ in
                 await log.log("parent")
                 return .immediate
@@ -463,7 +445,6 @@ struct CollectionStoreOrderingTests {
             TestTodo.self,
             identifier: testTodoIdentifier,
             table: "todos",
-            dispatchWait: .durablyQueued,
             onInsert: { context in
                 await log.log("insert:\(titleText(context.mutations[0].modified?["title"]))")
                 return .immediate
@@ -477,7 +458,6 @@ struct CollectionStoreOrderingTests {
             TestEvent.self,
             identifier: testEventIdentifier,
             table: "events",
-            dispatchWait: .durablyQueued,
             onInsert: { _ in
                 await log.log("intervening")
                 return .immediate

@@ -234,29 +234,8 @@ across retries, reconnects and replays; `transaction.status` reports `.retrying`
 in the meantime if you want progress. Cancelling the waiting task stops the
 wait, never the mutation.
 
-`CollectionDispatchWait` is deprecated and decides when a write call returns:
-
-```swift
-// Default today. Returns once this transaction has been offered to a handler.
-dispatchWait: .dispatchAttempted
-
-// Returns once the write is durable and ordered.
-dispatchWait: .durablyQueued
-```
-
-It is deprecated because the seam is wrong: it is static per collection, but
-when a call should return is a property of the call. The same model has capture
-paths that must not wait and interactive paths that want the result. The next
-major version removes it, mutations always return once queued, and callers
-needing the outcome await `wait()`.
-
-Ordering makes this choice bigger than latency. A `.dispatchAttempted` write
-waits for its own transaction, but its transaction cannot be attempted until
-every earlier one in the store has been -- so the call is bounded by collections
-it knows nothing about. Prefer `.durablyQueued` for capture-style writes, where
-the point is that the write survives rather than that it reaches the server now.
-Use `flush()` or `CollectionTransaction.wait()` when you genuinely need the round
-trip.
+Use `flush()` when you need the store drained without caring about one
+particular transaction, such as at shutdown or in tests.
 
 A parked conflict, an offline collection, a collection the application has not
 created yet, and a transaction persisted mid-flight all hold the lane rather

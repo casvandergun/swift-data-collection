@@ -33,6 +33,7 @@ struct CollectionConflictDispositionTests {
         _ = try? await collection.insert {
             TestTodo(id: "todo-1", projectID: "project-a", title: "Refused")
         }
+        await collection.flush()
 
         #expect(try await collection.conflicts().isEmpty)
 
@@ -99,6 +100,7 @@ struct CollectionConflictDispositionTests {
         _ = try? await collection.insert {
             TestTodo(id: "todo-1", projectID: "project-a", title: "Still valid")
         }
+        await collection.flush()
 
         let conflicts = try await collection.conflicts()
         #expect(conflicts.count == 1)
@@ -134,6 +136,7 @@ struct CollectionConflictDispositionTests {
         _ = try? await collection.update("todo-1") { todo in
             todo.title = "Edited"
         }
+        await collection.flush()
 
         #expect(try await collection.conflicts().isEmpty)
 
@@ -170,6 +173,7 @@ struct CollectionConflictDispositionTests {
         _ = try? await collection.update("todo-1") { todo in
             todo.title = "Edited"
         }
+        await collection.flush()
 
         let conflicts = try await collection.conflicts()
         #expect(conflicts.count == 1)
