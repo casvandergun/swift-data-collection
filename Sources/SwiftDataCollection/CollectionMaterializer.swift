@@ -466,16 +466,11 @@ private extension CollectionMaterializer {
         }
 
         static func precedes(_ lhs: Self, _ rhs: Self) -> Bool {
-            if lhs.transaction.sequenceNumber != rhs.transaction.sequenceNumber {
-                return lhs.transaction.sequenceNumber < rhs.transaction.sequenceNumber
-            }
-            if lhs.transaction.createdAt != rhs.transaction.createdAt {
-                return lhs.transaction.createdAt < rhs.transaction.createdAt
-            }
-            let lhsTransactionID = lhs.transaction.id.uuidString
-            let rhsTransactionID = rhs.transaction.id.uuidString
-            if lhsTransactionID != rhsTransactionID {
-                return lhsTransactionID < rhsTransactionID
+            // Overlays must replay in the same order the lane submitted them.
+            let lhsOrder = CollectionTransactionOrder(lhs.transaction)
+            let rhsOrder = CollectionTransactionOrder(rhs.transaction)
+            if lhsOrder != rhsOrder {
+                return lhsOrder < rhsOrder
             }
             if lhs.mutation.ordinal != rhs.mutation.ordinal {
                 return lhs.mutation.ordinal < rhs.mutation.ordinal

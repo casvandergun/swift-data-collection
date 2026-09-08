@@ -200,7 +200,7 @@ public actor SwiftDataCollectionStore {
         lastSyncedAt: Date?,
         offset: String?
     ) async {
-        for coordinator in coordinatorsByCollectionID.values {
+        for coordinator in orderedCoordinators {
             await coordinator.reportAdapterApplied(
                 sourceID: sourceID,
                 observedTokens: observedTokens,
@@ -208,6 +208,17 @@ public actor SwiftDataCollectionStore {
                 offset: offset
             )
         }
+    }
+
+    /// Coordinators in a stable order.
+    ///
+    /// Dictionary iteration order varies per process, which made the store's
+    /// fan-out loops nondeterministic -- including the reconnect path, where it
+    /// decided whether a bug reordered anything on a given run.
+    private var orderedCoordinators: [any CollectionRuntime] {
+        coordinatorsByCollectionID
+            .sorted { $0.key < $1.key }
+            .map(\.value)
     }
 
     private func bootstrapIfNeeded() async {
@@ -232,11 +243,25 @@ public actor SwiftDataCollectionStore {
     private func setConnectivityState(_ state: CollectionConnectivityState) async {
         guard connectivityState != state else { return }
         connectivityState = state
-        await dispatchLane.setConnectivityState(state)
-        for coordinator in coordinatorsByCollectionID.values {
-            await coordinator.setConnectivityState(state)
-        }
-        if state == .online {
+        /*
+         * The lane is opened last and closed first, because a collection that
+         * is still offline answers the lane with `skipped` -- and the lane
+         * steps past a skip. Opening the lane before every coordinator knows it
+         * is online therefore lets a child dispatch while its parent's
+         * collection is still refusing, which is the ordering bug this design
+         * exists to prevent.
+         */
+        switch state {
+        case .offline:
+            await dispatchLane.setConnectivityState(state)
+            for coordinator in orderedCoordinators {
+                await coordinator.setConnectivityState(state)
+            }
+        case .online:
+            for coordinator in orderedCoordinators {
+                await coordinator.setConnectivityState(state)
+            }
+            await dispatchLane.setConnectivityState(state)
             await flush()
         }
     }

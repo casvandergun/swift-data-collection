@@ -31,10 +31,10 @@ Ship the offline transaction hardening already on `main` together with coordinat
 - Injectable connectivity monitoring with an `NWPathMonitor` default.
 - Offline pause/resume for outbound outbox dispatch.
 - Immediate retry eligibility when connectivity returns.
-- `CollectionNonRetriableError` for permanent handler failures that should leave local state conflicted instead of retrying.
+- `CollectionNonRetriableError` for permanent handler failures, carrying a `CollectionConflictDisposition`: `.discard` (default) abandons the intent through the shared atomic repair path and reports it on `discardedConflicts`, `.quarantine` parks it for inspection. A discard whose authoritative baseline is unknown parks rather than guessing.
 - Documentation of TanStack offline-transaction parity and intentional SwiftData/Electric differences.
 - Durable `.stagedCreate` rows with stage, local update, publish, and discard operations.
-- Per-collection serialization of managed coordinator and adapter SwiftData writes.
+- Store-wide serialization of managed coordinator and adapter SwiftData writes, so transaction-sequence allocation and the commit that consumes it share one critical section.
 - Adapter-driven resolution of staged rows, with staged work preserved during deletes and resets.
 - Per-collection `CollectionDispatchWait`, defaulting to the existing `.dispatchAttempted` behaviour, plus a public `flush()` for explicit drains.
 - Private per-dirty-key authoritative evidence and deterministic overlay materialization shared by the coordinator, Electric, and Fetch without adding a UI read/query layer.
@@ -163,6 +163,7 @@ The Swift implementation should match TanStack's behavior where it maps cleanly 
 - Dynamic headers and parameters are not yet supported.
 - Postgres coercion coverage is still incomplete.
 - A slow or retrying transaction holds every later transaction in the store behind it. Dependency-aware lanes are deferred until measured head-of-line blocking justifies the persisted dependency graph.
+- The lane holds, rather than reordering, whenever earlier work cannot be dispatched: its collection is offline, its collection has not been created yet, or a persisted `sending` record is waiting for its collection to bootstrap.
 - Replay holds behind an earlier pending transaction whose collection has not been created yet. An application that permanently stops creating a collection with unresolved outbox work must discard that work to release the lane.
 - General pending/running outbox administration is not exposed; only conflict inspection and discard are public.
 - Mutation handlers do not yet receive a named idempotency-key field; use the transaction ID when idempotency is required.

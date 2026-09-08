@@ -148,6 +148,53 @@ public final class PendingCollectionTransaction {
     }
 }
 
+/// The durable order of transactions across the whole store.
+///
+/// The dispatch lane, the same-key barrier, and overlay materialization all
+/// depend on this ordering, so it is defined once. A lane that ordered
+/// differently from the materializer would submit work in one order and rebuild
+/// rows in another.
+///
+/// `sequenceNumber` is the authority; `createdAt` and the id only break ties
+/// among records that predate an allocator, and never let wall-clock movement
+/// reorder correctly sequenced work.
+package struct CollectionTransactionOrder: Comparable, Sendable {
+    package let sequenceNumber: Int
+    package let createdAt: Date
+    package let transactionID: UUID
+
+    package init(sequenceNumber: Int, createdAt: Date, transactionID: UUID) {
+        self.sequenceNumber = sequenceNumber
+        self.createdAt = createdAt
+        self.transactionID = transactionID
+    }
+
+    package init(_ transaction: PendingCollectionTransaction) {
+        self.init(
+            sequenceNumber: transaction.sequenceNumber,
+            createdAt: transaction.createdAt,
+            transactionID: transaction.id
+        )
+    }
+
+    package static func < (lhs: Self, rhs: Self) -> Bool {
+        if lhs.sequenceNumber != rhs.sequenceNumber {
+            return lhs.sequenceNumber < rhs.sequenceNumber
+        }
+        if lhs.createdAt != rhs.createdAt {
+            return lhs.createdAt < rhs.createdAt
+        }
+        return lhs.transactionID.uuidString < rhs.transactionID.uuidString
+    }
+
+    package static func isEarlier(
+        _ lhs: PendingCollectionTransaction,
+        _ rhs: PendingCollectionTransaction
+    ) -> Bool {
+        Self(lhs) < Self(rhs)
+    }
+}
+
 @Model
 public final class CollectionMetadata {
     @Attribute(.unique) public var collectionID: String
@@ -278,15 +325,7 @@ struct CollectionMutationQueue {
     func fetchAllPendingTransactions(collectionID: String) -> [PendingCollectionTransaction] {
         ((try? context.fetch(FetchDescriptor<PendingCollectionTransaction>())) ?? [])
             .filter { $0.collectionID == collectionID }
-            .sorted { lhs, rhs in
-                if lhs.sequenceNumber == rhs.sequenceNumber {
-                    if lhs.createdAt == rhs.createdAt {
-                        return lhs.id.uuidString < rhs.id.uuidString
-                    }
-                    return lhs.createdAt < rhs.createdAt
-                }
-                return lhs.sequenceNumber < rhs.sequenceNumber
-            }
+            .sorted(by: CollectionTransactionOrder.isEarlier)
     }
 
     func fetchPendingMutations(transactionID: UUID) -> [PendingCollectionMutation] {
@@ -310,7 +349,7 @@ struct CollectionMutationQueue {
         guard currentKeys.isEmpty == false else { return false }
 
         return fetchAllPendingTransactions(collectionID: collectionID)
-            .filter { isEarlier($0, than: transaction) }
+            .filter { CollectionTransactionOrder.isEarlier($0, transaction) }
             .filter { $0.status.blocksSuccessorDispatch }
             .contains { earlier in
                 let earlierKeys = Set(fetchPendingMutations(transactionID: earlier.id).map(\.targetKey))
@@ -328,7 +367,7 @@ struct CollectionMutationQueue {
         var compactable: [(transaction: PendingCollectionTransaction, mutation: PendingCollectionMutation)] = []
 
         for successor in fetchAllPendingTransactions(collectionID: collectionID)
-            .filter({ isEarlier(transaction, than: $0) }) {
+            .filter({ CollectionTransactionOrder.isEarlier(transaction, $0) }) {
             let mutations = fetchPendingMutations(transactionID: successor.id)
             guard mutations.contains(where: { $0.targetKey == targetKey }) else {
                 continue
@@ -357,19 +396,6 @@ struct CollectionMutationQueue {
         }
 
         return compactable
-    }
-
-    private func isEarlier(
-        _ lhs: PendingCollectionTransaction,
-        than rhs: PendingCollectionTransaction
-    ) -> Bool {
-        if lhs.sequenceNumber == rhs.sequenceNumber {
-            if lhs.createdAt == rhs.createdAt {
-                return lhs.id.uuidString < rhs.id.uuidString
-            }
-            return lhs.createdAt < rhs.createdAt
-        }
-        return lhs.sequenceNumber < rhs.sequenceNumber
     }
 
     private static func mutationIsEarlier(

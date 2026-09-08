@@ -36,8 +36,15 @@ public final class CollectionStoreMetadata {
 package enum CollectionDispatchOutcome: Sendable, Hashable {
     /// The outbound handler ran and durable state advanced. Re-evaluate.
     case dispatched
-    /// Not dispatchable right now. Step past it and leave it for a later pass.
+    /// This transaction cannot dispatch right now, but the collection can.
+    /// Step past it and leave it for a later pass.
     case skipped
+    /// The whole collection cannot dispatch right now. Hold the lane.
+    ///
+    /// Distinct from `skipped` because stepping past a collection that is
+    /// merely paused -- offline, say -- reorders every one of its transactions
+    /// behind work that was recorded after them.
+    case deferred
     /// Durable state could not be persisted. Abandon this drain.
     case halted
 }
@@ -48,20 +55,12 @@ package actor CollectionDispatchLane {
         let collectionID: String
         let shapeID: String
         let modelName: String
-        let sequenceNumber: Int
-        let createdAt: Date
+        let order: CollectionTransactionOrder
+        let status: PendingTransactionState
         let attemptCount: Int
         let nextRetryAt: Date?
 
-        static func isEarlier(_ lhs: Entry, _ rhs: Entry) -> Bool {
-            if lhs.sequenceNumber != rhs.sequenceNumber {
-                return lhs.sequenceNumber < rhs.sequenceNumber
-            }
-            if lhs.createdAt != rhs.createdAt {
-                return lhs.createdAt < rhs.createdAt
-            }
-            return lhs.id.uuidString < rhs.id.uuidString
-        }
+        var sequenceNumber: Int { order.sequenceNumber }
     }
 
     private let modelContainer: ModelContainer
@@ -148,10 +147,29 @@ package actor CollectionDispatchLane {
                 return
             }
 
-            let entries = dispatchableEntries()
+            let entries = laneEntries()
             guard let head = entries.first(where: { steppedPast.contains($0.id) == false }) else {
                 scheduleNextRetry(among: entries)
                 return
+            }
+
+            if head.status == .sending {
+                // Its collection has not bootstrapped, so nothing has reset it
+                // for replay yet and the lane cannot know whether the work
+                // reached the server. Hold; bootstrap drains again.
+                guard runtimesByCollectionID[head.collectionID] != nil else {
+                    trace(
+                        .dispatchDeferred,
+                        entry: head,
+                        message: "lane holding behind persisted in-flight work awaiting bootstrap",
+                        metadata: ["unregisteredCollectionID": head.collectionID]
+                    )
+                    return
+                }
+                // A registered collection already reset its crash remnants, so
+                // this belongs to a dispatch the coordinator still owns.
+                steppedPast.insert(head.id)
+                continue
             }
 
             if let retryAt = head.nextRetryAt, retryAt > Date() {
@@ -190,6 +208,14 @@ package actor CollectionDispatchLane {
                     message: "stepped past transaction that cannot dispatch yet"
                 )
                 steppedPast.insert(head.id)
+            case .deferred:
+                trace(
+                    .dispatchDeferred,
+                    entry: head,
+                    message: "lane holding for a collection that cannot dispatch yet",
+                    metadata: ["pausedCollectionID": head.collectionID]
+                )
+                return
             case .halted:
                 return
             }
@@ -197,17 +223,23 @@ package actor CollectionDispatchLane {
     }
 
     /*
-     * Only group leaders are dispatchable; compacted members travel with their
+     * Only group leaders participate; compacted members travel with their
      * leader's request. `conflicted` and `discarded` are deliberately absent:
      * this package parks permanently refused intent instead of dropping it, so
      * a terminal transaction would otherwise block every collection in the
      * store forever.
+     *
+     * `sending` is present but never dispatchable. A process that died mid
+     * dispatch leaves that state on disk, and its collection rewrites it to
+     * `pending` during bootstrap -- so until that collection exists again, the
+     * record is the only evidence that earlier work is still outstanding, and
+     * the lane has to hold behind it rather than run its successors.
      */
-    private func dispatchableEntries() -> [Entry] {
+    private func laneEntries() -> [Entry] {
         let context = ModelContext(modelContainer)
         let transactions = (try? context.fetch(FetchDescriptor<PendingCollectionTransaction>())) ?? []
         return transactions
-            .filter { $0.status == .pending || $0.status == .failed }
+            .filter { $0.status == .pending || $0.status == .failed || $0.status == .sending }
             .filter { $0.dispatchGroupID == nil || $0.dispatchGroupID == $0.id }
             .map {
                 Entry(
@@ -215,13 +247,13 @@ package actor CollectionDispatchLane {
                     collectionID: $0.collectionID,
                     shapeID: $0.shapeID,
                     modelName: $0.modelName,
-                    sequenceNumber: $0.sequenceNumber,
-                    createdAt: $0.createdAt,
+                    order: CollectionTransactionOrder($0),
+                    status: $0.status,
                     attemptCount: $0.attemptCount,
                     nextRetryAt: $0.nextRetryAt
                 )
             }
-            .sorted(by: Entry.isEarlier)
+            .sorted { $0.order < $1.order }
     }
 
     private func scheduleNextRetry(among entries: [Entry]) {

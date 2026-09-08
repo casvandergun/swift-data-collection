@@ -318,6 +318,194 @@ struct CollectionStoreOrderingTests {
         try await waitUntil { await log.value().count == 2 }
         #expect(await log.value() == ["parent", "child"])
     }
+
+    /// Reconnect brings collections online one at a time. A collection that is
+    /// still offline must pause the lane, not be stepped over -- otherwise the
+    /// child of a still-offline parent dispatches first.
+    @Test("Reconnect replays queued work in store order")
+    func reconnectPreservesOrder() async throws {
+        let log = HandlerLog()
+        let connectivity = TestConnectivityMonitor(initialState: .offline)
+        let container = try makeTestContainer()
+        let store = SwiftDataCollectionStore(
+            modelContainer: container,
+            connectivityMonitor: connectivity
+        )
+
+        let parents = try await store.collection(
+            TestTodo.self,
+            identifier: testTodoIdentifier,
+            table: "todos",
+            dispatchWait: .durablyQueued,
+            onInsert: { _ in
+                await log.log("parent")
+                return .immediate
+            }
+        )
+        let children = try await store.collection(
+            TestEvent.self,
+            identifier: testEventIdentifier,
+            table: "events",
+            dispatchWait: .durablyQueued,
+            onInsert: { _ in
+                await log.log("child")
+                return .immediate
+            }
+        )
+
+        _ = try await parents.insert {
+            TestTodo(id: "moment-1", projectID: "project-a", title: "Moment")
+        }
+        _ = try await children.insert {
+            TestEvent(id: "recording-1", title: "Recording", startTime: Date(timeIntervalSince1970: 0))
+        }
+        #expect(await log.value().isEmpty)
+
+        connectivity.setState(.online)
+
+        try await waitUntil { await log.value().count == 2 }
+        #expect(await log.value() == ["parent", "child"])
+    }
+
+    /// A process that dies mid-dispatch leaves `sending` on disk. Only the
+    /// owning collection's bootstrap can reset it, so until that collection
+    /// exists again the record is the only evidence that earlier work is
+    /// outstanding.
+    @Test("Persisted in-flight work blocks the lane until its collection bootstraps")
+    func persistedSendingHoldsTheLane() async throws {
+        let location = TestStoreLocation()
+        defer { location.cleanup() }
+        let log = HandlerLog()
+
+        do {
+            let offline = TestConnectivityMonitor(initialState: .offline)
+            let store = SwiftDataCollectionStore(
+                modelContainer: try location.makeContainer(),
+                connectivityMonitor: offline
+            )
+            let parents = try await store.collection(
+                TestTodo.self,
+                identifier: testTodoIdentifier,
+                table: "todos",
+                dispatchWait: .durablyQueued,
+                onInsert: { _ in .immediate }
+            )
+            let children = try await store.collection(
+                TestEvent.self,
+                identifier: testEventIdentifier,
+                table: "events",
+                dispatchWait: .durablyQueued,
+                onInsert: { _ in .immediate }
+            )
+            _ = try await parents.insert {
+                TestTodo(id: "moment-1", projectID: "project-a", title: "Moment")
+            }
+            _ = try await children.insert {
+                TestEvent(id: "recording-1", title: "Recording", startTime: Date(timeIntervalSince1970: 0))
+            }
+        }
+
+        // Simulate dying while the parent's request was in flight.
+        let crashContext = ModelContext(try location.makeContainer())
+        let parentTransaction = try #require(
+            crashContext.fetch(FetchDescriptor<PendingCollectionTransaction>())
+                .sorted { $0.sequenceNumber < $1.sequenceNumber }
+                .first
+        )
+        parentTransaction.status = .sending
+        try crashContext.save()
+
+        let relaunched = SwiftDataCollectionStore(modelContainer: try location.makeContainer())
+        _ = try await relaunched.collection(
+            TestEvent.self,
+            identifier: testEventIdentifier,
+            table: "events",
+            dispatchWait: .durablyQueued,
+            onInsert: { _ in
+                await log.log("child")
+                return .immediate
+            }
+        )
+        await relaunched.flush()
+        try await Task.sleep(nanoseconds: 150_000_000)
+        #expect(await log.value().isEmpty)
+
+        _ = try await relaunched.collection(
+            TestTodo.self,
+            identifier: testTodoIdentifier,
+            table: "todos",
+            dispatchWait: .durablyQueued,
+            onInsert: { _ in
+                await log.log("parent")
+                return .immediate
+            }
+        )
+        await relaunched.flush()
+
+        try await waitUntil { await log.value().count == 2 }
+        #expect(await log.value() == ["parent", "child"])
+    }
+
+    /// Compaction folds a later transaction's changes into an earlier request,
+    /// so it may not step over work that has not been submitted -- including
+    /// another collection's.
+    @Test("Compaction stops at an intervening transaction in another collection")
+    func compactionStopsAtInterveningCollection() async throws {
+        let log = HandlerLog()
+        let connectivity = TestConnectivityMonitor(initialState: .offline)
+        let container = try makeTestContainer()
+        let store = SwiftDataCollectionStore(
+            modelContainer: container,
+            connectivityMonitor: connectivity
+        )
+
+        let todos = try await store.collection(
+            TestTodo.self,
+            identifier: testTodoIdentifier,
+            table: "todos",
+            dispatchWait: .durablyQueued,
+            onInsert: { context in
+                await log.log("insert:\(titleText(context.mutations[0].modified?["title"]))")
+                return .immediate
+            },
+            onUpdate: { context in
+                await log.log("update:\(titleText(context.mutations[0].changes["title"]))")
+                return .immediate
+            }
+        )
+        let events = try await store.collection(
+            TestEvent.self,
+            identifier: testEventIdentifier,
+            table: "events",
+            dispatchWait: .durablyQueued,
+            onInsert: { _ in
+                await log.log("intervening")
+                return .immediate
+            }
+        )
+
+        _ = try await todos.insert {
+            TestTodo(id: "todo-1", projectID: "project-a", title: "First")
+        }
+        _ = try await events.insert {
+            TestEvent(id: "event-1", title: "Between", startTime: Date(timeIntervalSince1970: 0))
+        }
+        _ = try await todos.update("todo-1") { todo in
+            todo.title = "Revised"
+        }
+
+        connectivity.setState(.online)
+        try await waitUntil { await log.value().count == 3 }
+
+        // Without the store-wide scan the update folds into the insert, which
+        // both submits "Revised" early and drops the third dispatch entirely.
+        #expect(await log.value() == ["insert:First", "intervening", "update:Revised"])
+    }
 }
 
 private struct TestTransientError: Error {}
+
+private func titleText(_ value: CollectionValue?) -> String {
+    guard case .string(let text) = value else { return "?" }
+    return text
+}

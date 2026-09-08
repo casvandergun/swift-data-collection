@@ -277,7 +277,7 @@ actor CollectionCoordinator<
                     .filter { $0.collectionID == collectionID }
                 let members = allTransactions
                     .filter { ($0.dispatchGroupID ?? $0.id) == conflictID }
-                    .sorted(by: Self.transactionIsEarlier)
+                    .sorted(by: CollectionTransactionOrder.isEarlier)
 
                 guard members.isEmpty == false else {
                     throw CollectionConflictError.notFound(conflictID)
@@ -827,7 +827,9 @@ actor CollectionCoordinator<
     }
 
     func laneDispatch(transactionID id: UUID) async -> CollectionDispatchOutcome {
-        guard connectivityState == .online else { return .skipped }
+        // Offline pauses this collection, not this transaction. Reporting it as
+        // a skip would let the lane run everything recorded after it.
+        guard connectivityState == .online else { return .deferred }
         invalidateQueueContext()
         let transactionRecord = queue.fetchPendingTransaction(id: id, collectionID: collectionID)
         guard let transactionRecord else { return .skipped }
@@ -1100,9 +1102,9 @@ actor CollectionCoordinator<
         do {
             let dispatch = try writeGate.withCriticalSection {
                 let context = ModelContext(modelContainer)
-                let transactions = try context.fetch(FetchDescriptor<PendingCollectionTransaction>())
-                    .filter { $0.collectionID == collectionID }
-                    .sorted(by: Self.transactionIsEarlier)
+                let storeTransactions = try context.fetch(FetchDescriptor<PendingCollectionTransaction>())
+                    .sorted(by: CollectionTransactionOrder.isEarlier)
+                let transactions = storeTransactions.filter { $0.collectionID == collectionID }
                 guard let requested = transactions.first(where: { $0.id == requestedID }) else {
                     throw CollectionConflictError.notFound(requestedID)
                 }
@@ -1138,15 +1140,29 @@ actor CollectionCoordinator<
                     if leadingPending.count == 1,
                        let leading = leadingPending.first,
                        leading.operation == .create || leading.operation == .update {
-                        for successor in transactions where Self.transactionIsEarlier(requested, successor) {
+                        /*
+                         * Compaction submits a later transaction's changes
+                         * inside this earlier request, so it may not step over
+                         * anything still waiting to be submitted -- in this
+                         * collection or any other. Scanning store-wide is the
+                         * point: a collection-local scan cannot see the
+                         * intervening transaction it is reordering past.
+                         *
+                         * Already-submitted and terminal states are not
+                         * barriers. Their position in the submission order is
+                         * settled, so folding across them changes nothing.
+                         */
+                        for successor in storeTransactions
+                        where CollectionTransactionOrder.isEarlier(requested, successor) {
+                            guard successor.status == .pending || successor.status == .failed else {
+                                continue
+                            }
+                            guard successor.collectionID == collectionID else { break }
                             let pending = (mutationsByTransaction[successor.id] ?? [])
                                 .sorted(by: Self.mutationIsEarlier)
-                            let touchesLeadingKey = pending.contains { $0.targetKey == leading.targetKey }
-                            // A transaction for another key does not affect this
-                            // compaction run. Once the same key is encountered,
-                            // however, an ineligible transaction is a durable
-                            // ordering barrier and must not be crossed.
-                            guard touchesLeadingKey else { continue }
+                            guard pending.contains(where: { $0.targetKey == leading.targetKey }) else {
+                                break
+                            }
                             guard successor.status == .pending,
                                   successor.dispatchGroupID == nil,
                                   successor.submittedMutationsData == nil,
@@ -1176,7 +1192,7 @@ actor CollectionCoordinator<
                     requested.submittedMutationsData = frozenData
                 }
 
-                members.sort(by: Self.transactionIsEarlier)
+                members.sort(by: CollectionTransactionOrder.isEarlier)
                 let memberIDs = Set(members.map(\.id))
                 let stateMutations = allMutations.filter { memberIDs.contains($0.transactionID) }
                 for member in members {
@@ -1584,7 +1600,7 @@ actor CollectionCoordinator<
             let context = ModelContext(modelContainer)
             let transactions = try context.fetch(FetchDescriptor<PendingCollectionTransaction>())
                 .filter { $0.collectionID == collectionID }
-                .sorted(by: Self.transactionIsEarlier)
+                .sorted(by: CollectionTransactionOrder.isEarlier)
             let conflictedGroupIDs = Set(
                 transactions
                     .filter { $0.status == .conflicted }
@@ -1596,7 +1612,7 @@ actor CollectionCoordinator<
             return try conflictedGroupIDs.map { groupID in
                 let members = transactions
                     .filter { ($0.dispatchGroupID ?? $0.id) == groupID }
-                    .sorted(by: Self.transactionIsEarlier)
+                    .sorted(by: CollectionTransactionOrder.isEarlier)
                 let memberIDs = Set(members.map(\.id))
                 let sourceMutations = allMutations
                     .filter { memberIDs.contains($0.transactionID) }
@@ -1668,19 +1684,6 @@ actor CollectionCoordinator<
 
     private func removeConflictContinuation(_ id: UUID) {
         conflictContinuations.removeValue(forKey: id)
-    }
-
-    private static func transactionIsEarlier(
-        _ lhs: PendingCollectionTransaction,
-        _ rhs: PendingCollectionTransaction
-    ) -> Bool {
-        if lhs.sequenceNumber != rhs.sequenceNumber {
-            return lhs.sequenceNumber < rhs.sequenceNumber
-        }
-        if lhs.createdAt != rhs.createdAt {
-            return lhs.createdAt < rhs.createdAt
-        }
-        return lhs.id.uuidString < rhs.id.uuidString
     }
 
     private static func mutationIsEarlier(
