@@ -782,6 +782,18 @@ func jsonData(_ value: some Encodable) throws -> Data {
     try JSONEncoder().encode(value)
 }
 
+/// Waits until a transaction reports a failed attempt that the outbox will
+/// retry. `wait()` deliberately does not surface this: it is not an outcome.
+func waitUntilRetrying(
+    _ transaction: CollectionTransaction,
+    timeout: TimeInterval = 1
+) async throws {
+    try await waitUntil(timeout: timeout) {
+        if case .retrying = await transaction.status { return true }
+        return false
+    }
+}
+
 func waitUntil(
     timeout: TimeInterval = 1,
     interval: UInt64 = 20_000_000,

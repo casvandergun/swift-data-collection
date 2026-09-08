@@ -115,12 +115,7 @@ struct FetchSwiftDataCollectionTests {
         let transaction = try await collection.update("todo-2") { todo in
             todo.title = "Local"
         }
-        do {
-            try await transaction.wait()
-            Issue.record("Expected failed mutation")
-        } catch {
-            #expect(Bool(true))
-        }
+        try await waitUntilRetrying(transaction)
 
         await rows.set([
             testTodoCollectionRow(id: "todo-1", title: "One"),
@@ -214,12 +209,7 @@ struct FetchSwiftDataCollectionTests {
             TestTodo(id: "todo-1", projectID: "project-a", title: "Inserted")
         }
 
-        do {
-            try await transaction.wait()
-            Issue.record("Expected failed mutation")
-        } catch {
-            #expect(Bool(true))
-        }
+        try await waitUntilRetrying(transaction)
 
         let context = ModelContext(container)
         let pending = try #require(context.fetch(FetchDescriptor<PendingCollectionMutation>()).first)

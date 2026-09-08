@@ -631,7 +631,7 @@ actor CollectionCoordinator<
                 preparedTransaction,
                 persistedMutations: persistedMutations
             )
-            await liveTransaction.markDurablyQueued()
+            await liveTransaction.markQueued()
             trace(
                 .transactionPersisted,
                 transactionID: liveTransaction.id,
@@ -999,9 +999,20 @@ actor CollectionCoordinator<
                 return .halted
             }
 
+            /*
+             * Only a permanent refusal settles the transaction. A retryable
+             * error keeps the caller's handle registered and waiting: dropping
+             * it here reported a failure the outbox was already recovering
+             * from, and orphaned the handle, because a later successful retry
+             * built a fresh transaction the original caller never held.
+             */
             for representedTransactionID in dispatch.transactionIDs {
-                if let liveTransaction = liveTransactions.removeValue(forKey: representedTransactionID) {
-                    await liveTransaction.fail(error)
+                if isNonRetriable(error) {
+                    if let liveTransaction = liveTransactions.removeValue(forKey: representedTransactionID) {
+                        await liveTransaction.fail(error)
+                    }
+                } else {
+                    await liveTransactions[representedTransactionID]?.markRetrying(error)
                 }
             }
 

@@ -47,20 +47,17 @@ Ship the offline transaction hardening already on `main` together with coordinat
 
 ### Planned Decisions
 
-- Decide whether `.durablyQueued` should become the default `CollectionDispatchWait`, and in which version.
-  Store-wide ordering changed what this choice costs. `.dispatchAttempted` waits for the caller's own
-  transaction, but that transaction cannot be attempted until every earlier transaction in the store has
-  been -- so an interactive write is now bounded by the health of collections it knows nothing about,
-  not just by its own network round trip. `.durablyQueued` is correspondingly no longer just a latency
-  optimization: it is the only mode that decouples a caller from the store's global ordering.
-  Against that: post-dispatch state such as `awaiting` and `conflicted` is readable the moment a write
-  returns today, the package's own tests assert exactly that, and a refused write under the default
-  `.discard` disposition returns with its row already repaired -- which is genuinely useful for
-  interactive edits. Flipping the default is a breaking change that requires migrating those tests onto
-  `flush()` or `CollectionTransaction.wait()`, so it belongs in a deliberate major version.
-  Recommendation: keep `.dispatchAttempted` as the default, and document `.durablyQueued` as the right
-  choice for capture-style writes, where the point of the write is that it survives rather than that it
-  reaches the server now.
+- Remove `CollectionDispatchWait` in the next major version, making every mutation return once queued.
+  Decided: the configuration is at the wrong seam. It is static per collection, but when a call should
+  return is a property of the call -- a capture path and an interactive edit on the same model want
+  different answers. Deprecated now, removed next major; callers needing the outcome await
+  `CollectionTransaction.wait()`. For consumers already using `.durablyQueued` on capture collections,
+  migration is deleting the argument.
+- Do not add `waitForDispatch()` without a concrete caller that needs the midpoint -- a server that
+  accepts a write well before the authoritative row reappears through sync. It exposes an internal
+  scheduling phase, does not throw the dispatch failure, and callers wanting certainty need `wait()`
+  anyway. The lane's `drain(untilAttempted:)` stays private, supporting `.dispatchAttempted` until it
+  is removed.
 - Define named idempotency-key ergonomics for mutation handlers. The current fallback is `context.transaction.id`.
 - Define public outbox/status inspection APIs, including pending/running counts and queued transaction summaries.
 

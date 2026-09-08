@@ -69,6 +69,7 @@ The project is intentionally SwiftData-first:
 - Dispatch order is store-wide, not per collection. The lane releases on outbound handler return, not on adapter readback, and steps past terminal `conflicted` work so a parked refusal never stalls the store.
 - Completion is driven by observed Electric txids.
 - Outbound handler execution is paused while offline; local optimistic writes remain durable and replay when connectivity returns.
+- `CollectionTransaction.wait()` means the final outcome: it survives retryable failures and settles only on authoritative completion or permanent refusal. Never settle a live transaction on a retryable error, and never discard its handle -- a retry that later succeeds must complete the handle the caller holds.
 - Retryable failures use bounded exponential backoff. `CollectionNonRetriableError` carries a `CollectionConflictDisposition`: `.discard` (default) abandons the intent through the shared atomic repair path and reports it on `discardedConflicts`, `.quarantine` parks it for inspection. Discard never reverts a row whose authoritative baseline is unknown; it parks instead.
 
 ## SwiftData Guidance

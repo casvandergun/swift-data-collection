@@ -7,7 +7,7 @@ struct ElectricCollectionTransactionTests {
     func transactionCompletes() async throws {
         let transaction = ElectricCollectionTransaction()
 
-        #expect(await transaction.status == .durablyQueued)
+        #expect(await transaction.status == .queued)
 
         async let waitForCompletion: Void = transaction.wait()
         await transaction.markSending()

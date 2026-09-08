@@ -25,7 +25,7 @@ struct ElectricDatabaseReconciliationTests {
         }
         let initialStatus = await transaction.status
         switch initialStatus {
-        case .durablyQueued, .sending, .awaiting:
+        case .queued, .sending, .awaiting, .retrying:
             #expect(Bool(true))
         case .completed, .failed:
             Issue.record("Expected transaction to still be in progress before txid reconciliation")
@@ -124,12 +124,9 @@ struct ElectricDatabaseReconciliationTests {
             TestTodo(id: "todo-1", projectID: "project-a", title: "Inserted")
         }
 
-        do {
-            try await transaction.wait()
-            Issue.record("Expected completion wait to fail")
-        } catch {
-            #expect(Bool(true))
-        }
+        // A retryable error is not an outcome, so `wait()` stays suspended
+        // while the outbox retries. The observable signal is the status.
+        try await waitUntilRetrying(transaction)
 
         let context = ModelContext(container)
         let todo = try #require(context.fetch(testTodoIdentifier.fetchDescriptor(for: "todo-1")).first)
@@ -176,12 +173,7 @@ struct ElectricDatabaseReconciliationTests {
             TestTodo(id: "todo-1", projectID: "project-a", title: "Inserted")
         }
 
-        do {
-            try await transaction.wait()
-            Issue.record("Expected initial completion wait to fail before autonomous retry")
-        } catch {
-            #expect(Bool(true))
-        }
+        try await waitUntilRetrying(transaction)
 
         let context = ModelContext(container)
         let deadline = Date().addingTimeInterval(1)
@@ -518,12 +510,7 @@ struct ElectricDatabaseReconciliationTests {
 
         let transaction = try await collection.delete("todo-1")
 
-        do {
-            try await transaction.wait()
-            Issue.record("Expected delete completion wait to fail")
-        } catch {
-            #expect(Bool(true))
-        }
+        try await waitUntilRetrying(transaction)
 
         let context = ModelContext(container)
         let todo = try #require(context.fetch(testTodoIdentifier.fetchDescriptor(for: "todo-1")).first)

@@ -218,18 +218,37 @@ collections and across relaunches. The lane advances when a handler returns, not
 when the adapter reads the write back, so later work is not held behind sync
 latency.
 
-`CollectionDispatchWait` decides when a write call returns:
+A mutation returns once it is durably queued and holding its place in the
+order. When a caller needs the final outcome, it awaits the transaction:
 
 ```swift
-// Default. Returns once this transaction has been offered to a handler, so
-// `awaiting` or `conflicted` is readable immediately -- and under the default
-// `.discard` disposition, a refused write returns with its row already repaired.
+let transaction = try await recordings.insert { Recording(...) }
+// Durable, ordered, and replayed across relaunches from here on.
+
+try await transaction.wait()
+// Authoritatively complete, or thrown if permanently refused.
+```
+
+`wait()` means the outcome. A retryable failure is not one, so it keeps waiting
+across retries, reconnects and replays; `transaction.status` reports `.retrying`
+in the meantime if you want progress. Cancelling the waiting task stops the
+wait, never the mutation.
+
+`CollectionDispatchWait` is deprecated and decides when a write call returns:
+
+```swift
+// Default today. Returns once this transaction has been offered to a handler.
 dispatchWait: .dispatchAttempted
 
-// Returns once the write is durable and ordered. Reaching the server is the
-// lane's job.
+// Returns once the write is durable and ordered.
 dispatchWait: .durablyQueued
 ```
+
+It is deprecated because the seam is wrong: it is static per collection, but
+when a call should return is a property of the call. The same model has capture
+paths that must not wait and interactive paths that want the result. The next
+major version removes it, mutations always return once queued, and callers
+needing the outcome await `wait()`.
 
 Ordering makes this choice bigger than latency. A `.dispatchAttempted` write
 waits for its own transaction, but its transaction cannot be attempted until

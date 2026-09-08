@@ -319,12 +319,7 @@ struct ElectricCollectionRestartTests {
         )
 
         let transaction = try await collection.delete("todo-1")
-        do {
-            try await transaction.wait()
-            Issue.record("Expected delete completion to fail")
-        } catch {
-            #expect(Bool(true))
-        }
+        try await waitUntilRetrying(transaction)
 
         let reopenedContainer = try storeLocation.makeContainer()
         let reopenedDatabase = ElectricCollectionStore(
@@ -372,12 +367,7 @@ struct ElectricCollectionRestartTests {
         let transaction = try await collection.insert {
             TestTodo(id: "todo-1", projectID: "project-a", title: "Inserted")
         }
-        do {
-            try await transaction.wait()
-            Issue.record("Expected insert completion to fail")
-        } catch {
-            #expect(Bool(true))
-        }
+        try await waitUntilRetrying(transaction)
 
         let failedContext = ModelContext(container)
         let failedTransaction = try #require(failedContext.fetch(FetchDescriptor<ElectricPendingTransaction>()).first)

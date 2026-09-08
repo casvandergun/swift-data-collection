@@ -84,9 +84,17 @@ package typealias CollectionAdapterMutationHandler<
 > = @Sendable (CollectionMutationContext<Model, ID>) async throws -> CollectionMutationCompletion
 
 public enum CollectionTransactionStatus: Sendable, Hashable, Codable {
-    case durablyQueued
+    /// Durable locally and holding its place in the store-wide order. Every
+    /// mutation reaches at least this point before its call returns.
+    case queued
     case sending
     case awaiting
+    /// An attempt failed, and the durable outbox will try again.
+    ///
+    /// Distinct from `failed` because the outcome is not settled: this
+    /// transaction may still complete. Treating a retryable error as terminal
+    /// reports a failure the outbox is in the middle of recovering from.
+    case retrying(String)
     case completed
     case failed(String)
 }
@@ -95,8 +103,9 @@ public actor CollectionTransaction {
     public let id: UUID
     public let collectionID: String?
 
-    private var statusStorage: CollectionTransactionStatus = .durablyQueued
-    private var waiters: [CheckedContinuation<Void, Error>] = []
+    private var statusStorage: CollectionTransactionStatus = .queued
+    private var waiters: [UUID: CheckedContinuation<Void, Error>] = [:]
+    private var cancelledWaiters: Set<UUID> = []
 
     public init(id: UUID = UUID(), collectionID: String? = nil) {
         self.id = id
@@ -107,21 +116,62 @@ public actor CollectionTransaction {
         statusStorage
     }
 
+    /// Waits for this mutation's final outcome.
+    ///
+    /// Returns when the write is authoritatively complete, and throws when it
+    /// is permanently refused. A retryable failure is not an outcome: the
+    /// outbox is still working, so waiting continues across retries, reconnects
+    /// and replays.
+    ///
+    /// Cancelling the waiting task stops the wait. It does not cancel the
+    /// mutation, which is durable and proceeds regardless.
     public func wait() async throws {
         switch statusStorage {
         case .completed:
             return
         case .failed(let message):
             throw CollectionTransactionFailure(message: message)
-        case .durablyQueued, .sending, .awaiting:
-            try await withCheckedThrowingContinuation { continuation in
-                waiters.append(continuation)
+        case .queued, .sending, .awaiting, .retrying:
+            let waiterID = UUID()
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                    // Cancellation can arrive before the continuation is
+                    // stored; without this the waiter would never resume.
+                    if cancelledWaiters.remove(waiterID) != nil || Task.isCancelled {
+                        continuation.resume(throwing: CancellationError())
+                        return
+                    }
+                    waiters[waiterID] = continuation
+                }
+            } onCancel: {
+                Task { await self.cancelWaiter(waiterID) }
             }
         }
     }
 
-    public func markDurablyQueued() {
-        statusStorage = .durablyQueued
+    private func cancelWaiter(_ waiterID: UUID) {
+        guard let continuation = waiters.removeValue(forKey: waiterID) else {
+            cancelledWaiters.insert(waiterID)
+            return
+        }
+        continuation.resume(throwing: CancellationError())
+    }
+
+    private func resumeWaiters(throwing error: Error?) {
+        let continuations = waiters
+        waiters.removeAll(keepingCapacity: true)
+        cancelledWaiters.removeAll(keepingCapacity: true)
+        for continuation in continuations.values {
+            if let error {
+                continuation.resume(throwing: error)
+            } else {
+                continuation.resume()
+            }
+        }
+    }
+
+    public func markQueued() {
+        statusStorage = .queued
     }
 
     public func markSending() {
@@ -132,18 +182,20 @@ public actor CollectionTransaction {
         statusStorage = .awaiting
     }
 
+    /// Records a failed attempt without settling the transaction. Waiters stay
+    /// suspended, because the outbox will retry.
+    public func markRetrying(_ error: Error) {
+        statusStorage = .retrying(String(describing: error))
+    }
+
     public func complete() {
         statusStorage = .completed
-        let continuations = waiters
-        waiters.removeAll(keepingCapacity: true)
-        continuations.forEach { $0.resume() }
+        resumeWaiters(throwing: nil)
     }
 
     public func fail(_ error: Error) {
         statusStorage = .failed(String(describing: error))
-        let continuations = waiters
-        waiters.removeAll(keepingCapacity: true)
-        continuations.forEach { $0.resume(throwing: error) }
+        resumeWaiters(throwing: error)
     }
 }
 
@@ -218,6 +270,11 @@ public struct CollectionAdapter<
  * dispatch begins in both modes. Callers that still need the round trip await
  * `CollectionTransaction.wait()`, or drain the collection with `flush()`.
  */
+@available(
+    *,
+    deprecated,
+    message: "Waiting belongs at the call site, not on the collection: one static setting is always wrong for one of a collection's callers. Mutations will always return once queued; await CollectionTransaction.wait() where the final outcome is required."
+)
 public enum CollectionDispatchWait: String, Sendable, Hashable, Codable {
     case dispatchAttempted
     case durablyQueued
@@ -232,6 +289,7 @@ public struct CollectionOptions<
     public let identifier: CollectionModelIdentifier<Model, ID>
     public let adapter: CollectionAdapter<Model, ID>
     public let onApply: CollectionApplyHandler?
+    @available(*, deprecated, message: "Await CollectionTransaction.wait() at the call site instead.")
     public let dispatchWait: CollectionDispatchWait
     package let onInsert: CollectionAdapterMutationHandler<Model, ID>?
     package let onUpdate: CollectionAdapterMutationHandler<Model, ID>?

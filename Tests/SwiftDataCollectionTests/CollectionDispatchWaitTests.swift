@@ -58,7 +58,7 @@ struct CollectionDispatchWaitTests {
 
         // The handler is parked, so returning at all proves the write did not
         // wait for it.
-        #expect(await transaction.status == .durablyQueued)
+        #expect(await transaction.status == .queued)
 
         // The optimistic row and its outbox entry are already durable.
         let context = ModelContext(container)
