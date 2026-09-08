@@ -209,6 +209,42 @@ let stagedMoments = try context.fetch(FetchDescriptor<Moment>())
 
 Concurrent use of `ElectricSwiftDataRowApplier` and a managed collection over the same model type is unsupported. The standalone applier preserves staged rows, but it does not participate in the managed collection's write gate.
 
+## Dispatch Order And When A Write Returns
+
+A store dispatches every collection's transactions through one durable FIFO
+lane, ordered by a store-wide sequence number. A child's mutation therefore
+cannot reach the server before the parent recorded before it, across
+collections and across relaunches. The lane advances when a handler returns, not
+when the adapter reads the write back, so later work is not held behind sync
+latency.
+
+`CollectionDispatchWait` decides when a write call returns:
+
+```swift
+// Default. Returns once this transaction has been offered to a handler, so
+// `awaiting` or `conflicted` is readable immediately -- and under the default
+// `.discard` disposition, a refused write returns with its row already repaired.
+dispatchWait: .dispatchAttempted
+
+// Returns once the write is durable and ordered. Reaching the server is the
+// lane's job.
+dispatchWait: .durablyQueued
+```
+
+Ordering makes this choice bigger than latency. A `.dispatchAttempted` write
+waits for its own transaction, but its transaction cannot be attempted until
+every earlier one in the store has been -- so the call is bounded by collections
+it knows nothing about. Prefer `.durablyQueued` for capture-style writes, where
+the point is that the write survives rather than that it reaches the server now.
+Use `flush()` or `CollectionTransaction.wait()` when you genuinely need the round
+trip.
+
+A parked conflict, an offline collection, a collection the application has not
+created yet, and a transaction persisted mid-flight all hold the lane rather
+than letting later work overtake them. One slow or retrying transaction
+therefore delays every later transaction in the store; that is the cost of the
+ordering guarantee.
+
 ## Offline and Retry Behavior
 
 `SwiftDataCollectionStore` is network-aware by default on Apple platforms through `NWPathMonitor`. Local mutations are still accepted while offline: they are applied optimistically to SwiftData and persisted to the durable outbox, but outbound mutation handlers are not invoked until connectivity returns.

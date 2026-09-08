@@ -48,13 +48,19 @@ Ship the offline transaction hardening already on `main` together with coordinat
 ### Planned Decisions
 
 - Decide whether `.durablyQueued` should become the default `CollectionDispatchWait`, and in which version.
-  Awaiting dispatch inside a write is arguably at odds with the package's local-first stance: on a slow
-  network it turns an offline-capable local write into a stall. It is also observable behaviour that
-  callers depend on today -- post-dispatch state such as `awaiting` and `conflicted` is readable the
-  moment a write returns, and the package's own tests assert exactly that. Flipping the default is
-  therefore a breaking change that requires migrating those tests onto `flush()` or
-  `CollectionTransaction.wait()`, and it belongs in a deliberate major version rather than alongside
-  other work.
+  Store-wide ordering changed what this choice costs. `.dispatchAttempted` waits for the caller's own
+  transaction, but that transaction cannot be attempted until every earlier transaction in the store has
+  been -- so an interactive write is now bounded by the health of collections it knows nothing about,
+  not just by its own network round trip. `.durablyQueued` is correspondingly no longer just a latency
+  optimization: it is the only mode that decouples a caller from the store's global ordering.
+  Against that: post-dispatch state such as `awaiting` and `conflicted` is readable the moment a write
+  returns today, the package's own tests assert exactly that, and a refused write under the default
+  `.discard` disposition returns with its row already repaired -- which is genuinely useful for
+  interactive edits. Flipping the default is a breaking change that requires migrating those tests onto
+  `flush()` or `CollectionTransaction.wait()`, so it belongs in a deliberate major version.
+  Recommendation: keep `.dispatchAttempted` as the default, and document `.durablyQueued` as the right
+  choice for capture-style writes, where the point of the write is that it survives rather than that it
+  reaches the server now.
 - Define named idempotency-key ergonomics for mutation handlers. The current fallback is `context.transaction.id`.
 - Define public outbox/status inspection APIs, including pending/running counts and queued transaction summaries.
 

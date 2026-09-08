@@ -20,6 +20,8 @@ struct CollectionDispatchWaitTests {
             }
         }
 
+        func hasReleased() -> Bool { isReleased }
+
         func release() {
             isReleased = true
             let continuations = waiters
@@ -67,6 +69,58 @@ struct CollectionDispatchWaitTests {
         await gate.release()
         try await transaction.wait()
         #expect(await gate.invocations() == 1)
+    }
+
+    /// `.dispatchAttempted` promises the caller's own mutation reached a
+    /// handler. It must not also bind that caller to whatever else the store
+    /// happens to be carrying: the lane drains until it quiesces, so awaiting
+    /// the whole drain would make an interactive write wait on work queued
+    /// after it, in a collection it knows nothing about.
+    @Test("Dispatch-attempted writes do not wait for later work in another collection")
+    func dispatchAttemptedDoesNotWaitForUnrelatedLaterWork() async throws {
+        let gate = HandlerGate()
+        let container = try makeTestContainer()
+        let store = SwiftDataCollectionStore(modelContainer: container)
+
+        let background = try await store.collection(
+            TestEvent.self,
+            identifier: testEventIdentifier,
+            table: "events",
+            dispatchWait: .durablyQueued,
+            onInsert: { _ in
+                await gate.waitForRelease()
+                return .immediate
+            }
+        )
+        let interactive = try await store.collection(
+            TestTodo.self,
+            identifier: testTodoIdentifier,
+            table: "todos",
+            onInsert: { _ in
+                // A background capture lands while this write is in flight, so
+                // it takes a later sequence number than the caller's.
+                _ = try? await background.insert {
+                    TestEvent(id: "event-1", title: "Later", startTime: Date(timeIntervalSince1970: 0))
+                }
+                return .immediate
+            }
+        )
+
+        let writeReturned = HandlerGate()
+        let writer = Task {
+            _ = try? await interactive.insert {
+                TestTodo(id: "todo-1", projectID: "project-a", title: "Interactive")
+            }
+            await writeReturned.release()
+        }
+        defer { writer.cancel() }
+
+        // Wait until the lane has moved on to the parked background handler,
+        // then check the interactive write is not still held behind it.
+        try await waitUntil { await gate.invocations() == 1 }
+        try await waitUntil { await writeReturned.hasReleased() }
+
+        await gate.release()
     }
 
     /// The default is unchanged: dispatch has been attempted by the time the

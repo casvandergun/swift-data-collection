@@ -665,7 +665,7 @@ actor CollectionCoordinator<
             case .durablyQueued:
                 enqueueDispatchWithoutWaiting()
             case .dispatchAttempted:
-                await enqueueDispatch()
+                await enqueueDispatch(transactionID: liveTransaction.id)
             }
             return liveTransaction
         } catch {
@@ -805,12 +805,28 @@ actor CollectionCoordinator<
      * round trip await `CollectionTransaction.wait()`; tests force it with
      * `flush()`.
      */
-    private func enqueueDispatch() async {
-        await drainDispatchIfNeeded()
+    private func enqueueDispatch(transactionID: UUID) async {
+        guard await laneIsAcceptingDispatch() else { return }
+        await dispatchLane.drain(untilAttempted: transactionID)
     }
 
     private func enqueueDispatchWithoutWaiting() {
         Task { await self.drainDispatchIfNeeded() }
+    }
+
+    /// Reports offline the way `drainDispatchIfNeeded` does, so a write made
+    /// while offline still settles this collection's lifecycle state.
+    private func laneIsAcceptingDispatch() async -> Bool {
+        guard connectivityState == .online else {
+            trace(
+                .dispatchPausedOffline,
+                message: "dispatch paused while offline",
+                metadata: ["connectivity": connectivityState.rawValue]
+            )
+            await transitionLifecycle(to: .offline, reason: "dispatch paused while offline", errorMessage: nil)
+            return false
+        }
+        return true
     }
 
     private func drainDispatchIfNeeded() async {
