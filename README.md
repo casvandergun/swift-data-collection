@@ -191,7 +191,7 @@ Staging is idempotent. It returns `.inserted`, `.alreadyStaged`, or `.alreadySyn
 
 Only adapter observation, publication, or explicit discard leaves `.stagedCreate`. Timeouts never publish staged work automatically. Adapter deletes, missing Fetch snapshot rows, and Electric `must-refetch` cleanup preserve staged rows.
 
-Managed adapter application and collection writes are serialized per collection. The relevant race outcomes are:
+Managed adapter application and collection writes are serialized across the store. The relevant race outcomes are:
 
 - `.alreadySynced` from `stageInsert` means adapter application won.
 - `invalidStagedTransition(..., .synced)` from publication means adapter resolution won; continue with the synchronized row.
@@ -217,14 +217,47 @@ When the monitor reports online again, failed transactions are made eligible imm
 
 Handlers are at-least-once: a transaction can be replayed after process restart, reconnect, or retry. Use stable transaction IDs or idempotency keys with your backend when a mutation endpoint is not naturally idempotent.
 
-Throw `CollectionNonRetriableError` from a handler for permanent application failures such as validation, authorization, or unrecoverable conflict errors. The transaction and mutations are marked conflicted instead of being retried, and an existing affected row shows `.conflicted`. Retryable failures show `.error`.
+Throw `CollectionNonRetriableError` from a handler for permanent application failures such as validation, authorization, or unrecoverable conflict errors. The transaction and mutations stop retrying, and retryable failures show `.error`.
+
+A permanent refusal carries a `CollectionConflictDisposition` saying what should happen to the intent already written into SwiftData:
+
+```swift
+// The server judged the intent and refused it. The client lost, so abandon the
+// intent and repair the row. This is the default.
+throw CollectionNonRetriableError("duplicate slug")
+
+// Permanently failed, but the content is valid and should survive.
+throw CollectionNonRetriableError("token expired", disposition: .quarantine)
+```
+
+Choose deliberately. Mapping every 4xx to the default is the common mistake: an
+expired token, a bad deploy answering 400, and a client serialization bug all
+describe content a person still wants. Reach for `.quarantine` whenever the
+refusal says more about the request than about the intent.
+
+`.discard` runs the same atomic repair as an explicit `discard(_:)`, so it never
+reverts a row whose authoritative baseline was never observed -- that group
+parks exactly as `.quarantine` would, and the affected row shows `.conflicted`.
+
+Because discard removes work nobody asked to remove, each one is reported:
+
+```swift
+for await discarded in await todos.discardedConflicts {
+    // Tell someone their edit did not survive.
+    notify(discarded)
+}
+```
+
+`conflictUpdates` carries only intent that is still parked, so a discarded group
+never appears there.
 
 ## Inspecting And Discarding Conflicts
 
 Conflicts are durable dispatch groups. A single transaction forms its own group;
 compatible never-submitted transactions may be compacted into one request and
 then share a conflict ID. A parked conflict blocks later dispatch on its keys;
-unrelated keys continue.
+unrelated keys continue, in this collection and in every other collection the
+store schedules.
 
 ```swift
 let conflicts = try await todos.conflicts()

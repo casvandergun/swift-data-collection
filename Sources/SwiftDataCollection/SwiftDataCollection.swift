@@ -316,6 +316,7 @@ public struct SwiftDataCollection<Model: SwiftDataCollectionModel, ID: Hashable 
     private let conflictsClosure: @Sendable () async throws -> [CollectionConflict]
     private let conflictUpdatesClosure: @Sendable () async -> AsyncThrowingStream<[CollectionConflict], any Error>
     private let discardConflictClosure: @Sendable (UUID) async throws -> Void
+    private let discardedConflictsClosure: @Sendable () async -> AsyncStream<CollectionConflict>
 
     public let sourceID: String
     public let debugName: String
@@ -347,6 +348,7 @@ public struct SwiftDataCollection<Model: SwiftDataCollectionModel, ID: Hashable 
         self.conflictsClosure = { try await coordinator.conflicts() }
         self.conflictUpdatesClosure = { await coordinator.conflictUpdates() }
         self.discardConflictClosure = { conflictID in try await coordinator.discard(conflictID) }
+        self.discardedConflictsClosure = { await coordinator.discardedConflicts() }
         self.sourceID = sourceID
         self.debugName = debugName
     }
@@ -445,5 +447,14 @@ public struct SwiftDataCollection<Model: SwiftDataCollectionModel, ID: Hashable 
     /// visible rows from retained authoritative evidence plus surviving intent.
     public func discard(_ conflictID: UUID) async throws {
         try await discardConflictClosure(conflictID)
+    }
+
+    /// Groups that `CollectionConflictDisposition.discard` abandoned automatically,
+    /// each delivered once with the diagnostic snapshot captured before repair.
+    ///
+    /// Subscribe when the application needs to tell someone that their work was
+    /// dropped; `conflictUpdates` reports only intent that is still parked.
+    public var discardedConflicts: AsyncStream<CollectionConflict> {
+        get async { await discardedConflictsClosure() }
     }
 }

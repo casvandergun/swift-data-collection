@@ -39,6 +39,7 @@ Ship the offline transaction hardening already on `main` together with coordinat
 - Per-collection `CollectionDispatchWait`, defaulting to the existing `.dispatchAttempted` behaviour, plus a public `flush()` for explicit drains.
 - Private per-dirty-key authoritative evidence and deterministic overlay materialization shared by the coordinator, Electric, and Fetch without adding a UI read/query layer.
 - Monotonic transaction sequencing, stable compacted dispatch groups, frozen retry requests, and same-key conflict barriers.
+- Store-wide FIFO dispatch ordering across all collections, with a store-wide sequence allocator, a shared write gate, and a single retry timer. Resolves the cross-collection scheduling decision in favour of a store-level scheduler; explicit dependency lanes remain deferred.
 - Public conflict snapshots/update streams and atomic group discard with successor payload repair.
 - A schema-composition helper and startup validation for runtime metadata; v0.2.0 uses an explicit hard schema/source migration.
 - Distinct row states: `.error` for retryable failures and `.conflicted` for permanently refused intent.
@@ -54,10 +55,6 @@ Ship the offline transaction hardening already on `main` together with coordinat
   therefore a breaking change that requires migrating those tests onto `flush()` or
   `CollectionTransaction.wait()`, and it belongs in a deliberate major version rather than alongside
   other work.
-- Decide whether cross-collection ordering should be implemented as:
-  - explicit transaction dependencies such as `dependsOnTransactionIDs` or `dependsOnKeys`
-  - a store-level scheduler with global FIFO dispatch
-  - a hybrid scheduler that only blocks declared dependencies
 - Define named idempotency-key ergonomics for mutation handlers. The current fallback is `context.transaction.id`.
 - Define public outbox/status inspection APIs, including pending/running counts and queued transaction summaries.
 
@@ -82,10 +79,14 @@ Do not use `v0.1.3` for the current offline connectivity work unless the release
 
 ## v0.2.x
 
+### Scheduling
+
+- Scope explicit transaction dependencies (`dependsOnTransactionIDs` / `dependsOnKeys`) or dependency-aware lanes if head-of-line blocking in the store-wide lane becomes a measured problem.
+
 ### Retry And Outbox Operations
 
 - Scope a `beforeRetry`-style hook against the v0.2.0 repair and frozen-request contracts. Dropping work must use materialization; already-submitted request bodies must remain stable.
-- Scope durable retention for resolved/discarded delivery records. Conflicted work requires explicit resolution; age alone must not delete unresolved intent or its base.
+- Scope durable retention for resolved/discarded delivery records. Automatic `.discard` now produces these routinely, so retention needs a policy sooner than when every refusal parked. Age alone must not delete unresolved intent or its base.
 - Use the v0.2.0 conflict inspection/discard interface as the first outbox administration surface. Defer generic removal/clear operations until they can share its atomic repair path.
 
 ### Diagnostics And Status
@@ -148,10 +149,10 @@ Private base metadata retained only for unresolved keys is permitted as write-co
 The Swift implementation should match TanStack's behavior where it maps cleanly to SwiftData, but these differences are intentional or still open:
 
 - **Authoritative completion:** TanStack removes an outbox transaction when the mutation function succeeds. Electric-backed collections may remain `.awaiting` until observed txids or refresh completion prove that SwiftData has seen the authoritative write.
-- **Permanent failures:** TanStack's `NonRetriableError` removes the transaction from the outbox and rejects waiters. SwiftDataCollection parks transaction and mutation state as `.conflicted`, exposes the conflict group for inspection, and leaves its intent materialized until explicit discard.
-- **Scheduling scope:** TanStack schedules through one global executor. SwiftDataCollection schedules per collection today; `v0.2.0` should decide whether a store-level scheduler or explicit dependency model is the right SwiftData adaptation.
+- **Permanent failures:** TanStack's `NonRetriableError` removes the transaction from the outbox and rejects waiters; its optimistic state was only ever an in-memory overlay, so dropping it costs nothing durable. SwiftDataCollection wrote optimistically into SwiftData, the application's real database, so it makes the choice explicit: `.discard` abandons the intent and repairs the row from retained authoritative evidence, `.quarantine` keeps it parked for inspection, and a discard whose baseline is unknown parks rather than guessing.
+- **Scheduling scope:** both schedule through one global serial executor. TanStack's `KeyScheduler` holds a single running slot and only ever runs the queue head, ordering by `createdAt`; its `maxConcurrency` config field is not read. SwiftDataCollection orders by a persisted monotonic sequence instead of wall-clock time, and must additionally step past parked conflicts because it retains permanently refused intent where TanStack removes it.
 - **Storage and leadership:** TanStack needs IndexedDB/localStorage fallback and Web Locks/BroadcastChannel leader election. SwiftDataCollection uses SwiftData durability and does not have browser tab leadership.
-- **Outbox administration:** TanStack exposes broad outbox inspection and removal APIs. SwiftDataCollection intentionally exposes only conflict-group inspection and safe discard today; generic administration remains deferred.
+- **Outbox administration:** TanStack exposes broad outbox inspection and removal APIs. SwiftDataCollection intentionally exposes only conflict-group inspection, safe discard, and the discarded-conflict stream today; generic administration remains deferred.
 - **Retry filtering:** TanStack has `beforeRetry` to filter loaded transactions before replay. SwiftDataCollection does not yet expose an equivalent hook.
 - **Idempotency ergonomics:** TanStack passes an explicit `idempotencyKey` into mutation functions. SwiftDataCollection handlers can use `context.transaction.id`, but a named idempotency-key convenience is still open.
 
@@ -161,7 +162,8 @@ The Swift implementation should match TanStack's behavior where it maps cleanly 
 - The automated confidence bar is restart-grade persistence coverage plus high-fidelity protocol-contract tests, not a full live backend E2E lane.
 - Dynamic headers and parameters are not yet supported.
 - Postgres coercion coverage is still incomplete.
-- Dispatch scheduling is per collection, not globally FIFO across all collections.
+- A slow or retrying transaction holds every later transaction in the store behind it. Dependency-aware lanes are deferred until measured head-of-line blocking justifies the persisted dependency graph.
+- Replay holds behind an earlier pending transaction whose collection has not been created yet. An application that permanently stops creating a collection with unresolved outbox work must discard that work to release the lane.
 - General pending/running outbox administration is not exposed; only conflict inspection and discard are public.
 - Mutation handlers do not yet receive a named idempotency-key field; use the transaction ID when idempotency is required.
 - There is no `beforeRetry`-style hook for apps to filter or drop loaded transactions before replay.

@@ -10,7 +10,7 @@ struct CollectionSchemaTests {
         let types = SwiftDataCollectionSchema.models(including: [
             TestTodo.self, PendingCollectionMutation.self,
         ])
-        #expect(types.count == 5)
+        #expect(types.count == 6)
         let container = try ModelContainer(
             for: Schema(types), configurations: ModelConfiguration(isStoredInMemoryOnly: true)
         )
@@ -24,7 +24,9 @@ struct CollectionSchemaTests {
             PendingCollectionTransaction.self, CollectionMetadata.self,
             configurations: ModelConfiguration(isStoredInMemoryOnly: true)
         )
-        #expect(throws: CollectionSchemaError.missingRuntimeModels(["CollectionAuthoritativeBase"])) {
+        #expect(throws: CollectionSchemaError.missingRuntimeModels(
+            ["CollectionStoreMetadata", "CollectionAuthoritativeBase"]
+        )) {
             try SwiftDataCollectionSchema.validate(container)
         }
     }
@@ -64,8 +66,10 @@ struct CollectionSchemaTests {
                 collectionID: "roundtrip", shapeID: "roundtrip",
                 modelName: "TestTodo", debugName: "Roundtrip"
             )
-            metadata.nextTransactionSequence = 20
             context.insert(metadata)
+            let storeMetadata = CollectionStoreMetadata()
+            storeMetadata.nextTransactionSequence = 20
+            context.insert(storeMetadata)
             try context.save()
         }
         let reopened = try location.makeContainer()
@@ -76,6 +80,6 @@ struct CollectionSchemaTests {
         #expect(transaction.dispatchGroupID == groupID)
         #expect(transaction.submittedMutationsData == Data("[]".utf8))
         #expect(transaction.conflictOccurredAt == Date(timeIntervalSince1970: 42))
-        #expect(try context.fetch(FetchDescriptor<CollectionMetadata>()).first?.nextTransactionSequence == 20)
+        #expect(try context.fetch(FetchDescriptor<CollectionStoreMetadata>()).first?.nextTransactionSequence == 20)
     }
 }

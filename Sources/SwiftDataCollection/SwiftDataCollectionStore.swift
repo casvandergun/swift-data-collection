@@ -62,6 +62,8 @@ public actor SwiftDataCollectionStore {
     private var bootstrapCompleted = false
     private var foregroundObserversInstalled = false
     private var foregroundObserverTokens: [CollectionForegroundObserverToken] = []
+    private let writeGate = CollectionWriteGate()
+    private var dispatchLaneStorage: CollectionDispatchLane?
     private var connectivityObserverTask: Task<Void, Never>?
     private var connectivityState: CollectionConnectivityState = .online
     private var coordinatorsByCollectionID: [String: any CollectionRuntime] = [:]
@@ -165,6 +167,7 @@ public actor SwiftDataCollectionStore {
             options: options
         )
         coordinatorsByCollectionID[collectionID] = coordinator
+        await dispatchLane.register(coordinator, collectionID: collectionID)
         await coordinator.bootstrapIfNeeded()
 
         let collection = SwiftDataCollection(
@@ -188,9 +191,7 @@ public actor SwiftDataCollectionStore {
 
     public func flush() async {
         await bootstrapIfNeeded()
-        for coordinator in coordinatorsByCollectionID.values {
-            await coordinator.flush()
-        }
+        await dispatchLane.drain()
     }
 
     package func reportAdapterApplied(
@@ -231,6 +232,7 @@ public actor SwiftDataCollectionStore {
     private func setConnectivityState(_ state: CollectionConnectivityState) async {
         guard connectivityState != state else { return }
         connectivityState = state
+        await dispatchLane.setConnectivityState(state)
         for coordinator in coordinatorsByCollectionID.values {
             await coordinator.setConnectivityState(state)
         }
@@ -249,6 +251,20 @@ public actor SwiftDataCollectionStore {
         }
     }
 
+    private var dispatchLane: CollectionDispatchLane {
+        if let dispatchLaneStorage {
+            return dispatchLaneStorage
+        }
+        let lane = CollectionDispatchLane(
+            modelContainer: modelContainer,
+            retrySleep: retrySleep,
+            tracer: tracer,
+            connectivityState: connectivityState
+        )
+        dispatchLaneStorage = lane
+        return lane
+    }
+
     private func makeCoordinator<
         Model: SwiftDataCollectionModel,
         ID: Hashable & Sendable
@@ -257,7 +273,6 @@ public actor SwiftDataCollectionStore {
         options: CollectionOptions<Model, ID>
     ) async throws -> CollectionCoordinator<Model, ID> {
         let relay = CollectionAdapterEventRelay<Model, ID>()
-        let writeGate = CollectionWriteGate()
 
         let context = CollectionAdapterContext<Model, ID>(
             modelContainer: modelContainer,
@@ -298,7 +313,7 @@ public actor SwiftDataCollectionStore {
             writeGate: writeGate,
             commitSave: commitSave,
             retryPolicy: retryPolicy,
-            retrySleep: retrySleep,
+            dispatchLane: dispatchLane,
             connectivityState: connectivityState
         )
         await relay.bind(createdCoordinator)

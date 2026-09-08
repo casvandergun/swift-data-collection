@@ -5,7 +5,8 @@ import SwiftData
 public enum SwiftDataCollectionSchema {
     public static var models: [any PersistentModel.Type] {
         [PendingCollectionMutation.self, PendingCollectionTransaction.self,
-         CollectionMetadata.self, CollectionAuthoritativeBase.self]
+         CollectionMetadata.self, CollectionStoreMetadata.self,
+         CollectionAuthoritativeBase.self]
     }
 
     public static func models(

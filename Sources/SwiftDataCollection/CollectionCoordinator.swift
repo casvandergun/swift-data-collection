@@ -10,6 +10,12 @@ package protocol CollectionRuntime: Actor {
         lastSyncedAt: Date?,
         offset: String?
     ) async
+    /// Dispatches exactly one transaction on behalf of the store-wide lane.
+    ///
+    /// Collections no longer schedule their own outbound work: ordering is a
+    /// store-level invariant, and a collection that drained itself could
+    /// overtake an earlier transaction in another collection.
+    func laneDispatch(transactionID: UUID) async -> CollectionDispatchOutcome
 }
 
 actor CollectionCoordinator<
@@ -29,7 +35,7 @@ actor CollectionCoordinator<
     private let reconciler: CollectionMutationReconciler
     private let retryPolicy: any PendingMutationRetryDelaying
     private let commitSave: CollectionCommitSaver
-    private let retrySleep: CollectionRetrySleeper
+    private let dispatchLane: CollectionDispatchLane
 
     private var bootstrapCompleted = false
     private var lifecycleState: CollectionLifecycleState = .idle
@@ -37,14 +43,13 @@ actor CollectionCoordinator<
     private var awaitedTransactionIDsByToken: [String: Set<UUID>] = [:]
     private var remainingTokensByTransactionID: [UUID: Set<String>] = [:]
     private var awaitingRefreshTransactionIDs: Set<UUID> = []
-    private var pendingDispatchIDs: [UUID] = []
-    private var isDrainingDispatch = false
     private var connectivityState: CollectionConnectivityState
-    private var scheduledRetryAt: Date?
-    private var scheduledRetryTask: Task<Void, Never>?
     private var debugEvents: [String] = []
     private var conflictContinuations: [
         UUID: AsyncThrowingStream<[CollectionConflict], any Error>.Continuation
+    ] = [:]
+    private var discardedConflictContinuations: [
+        UUID: AsyncStream<CollectionConflict>.Continuation
     ] = [:]
 
     init(
@@ -59,7 +64,7 @@ actor CollectionCoordinator<
         writeGate: CollectionWriteGate = CollectionWriteGate(),
         commitSave: @escaping CollectionCommitSaver = { try $0.save() },
         retryPolicy: any PendingMutationRetryDelaying = CollectionRetryPolicy(),
-        retrySleep: @escaping CollectionRetrySleeper = defaultCollectionRetrySleep,
+        dispatchLane: CollectionDispatchLane,
         connectivityState: CollectionConnectivityState = .online
     ) {
         self.collectionID = collectionID
@@ -75,12 +80,8 @@ actor CollectionCoordinator<
         self.reconciler = CollectionMutationReconciler(modelContainer: modelContainer)
         self.commitSave = commitSave
         self.retryPolicy = retryPolicy
-        self.retrySleep = retrySleep
+        self.dispatchLane = dispatchLane
         self.connectivityState = connectivityState
-    }
-
-    deinit {
-        scheduledRetryTask?.cancel()
     }
 
     func bootstrapIfNeeded() async {
@@ -154,6 +155,19 @@ actor CollectionCoordinator<
         try? saveQueueContext()
         invalidateQueueContext()
         refreshPendingModelStates()
+
+        let replayableTransactionIDs = pendingTransactions
+            .filter { $0.status == .pending || $0.status == .failed }
+            .map(\.id)
+        if replayableTransactionIDs.isEmpty == false {
+            trace(
+                .replayStarted,
+                message: "replaying persisted transactions through the store dispatch lane",
+                metadata: [
+                    "transactionIDs": replayableTransactionIDs.map(\.uuidString).joined(separator: ","),
+                ]
+            )
+        }
         await drainDispatchIfNeeded()
         trace(
             .bootstrapCompleted,
@@ -171,7 +185,6 @@ actor CollectionCoordinator<
     }
 
     func stop() async {
-        cancelScheduledRetry()
         await adapterRuntime.stop()
         await transitionLifecycle(to: .idle, reason: "collection stop requested", errorMessage: nil)
     }
@@ -216,8 +229,47 @@ actor CollectionCoordinator<
         return pair.stream
     }
 
+    /*
+     * Auto-discard is the only path that removes user intent without anyone
+     * asking, so it must not be silent. `conflictUpdates` cannot carry it: a
+     * discarded group is absent from the parked snapshot by construction, so a
+     * subscriber would observe empty-to-empty and have nothing to report.
+     */
+    func discardedConflicts() async -> AsyncStream<CollectionConflict> {
+        await bootstrapIfNeeded()
+        let subscriptionID = UUID()
+        let pair = AsyncStream<CollectionConflict>.makeStream(bufferingPolicy: .unbounded)
+        discardedConflictContinuations[subscriptionID] = pair.continuation
+        pair.continuation.onTermination = { [weak self] _ in
+            Task { await self?.removeDiscardedConflictContinuation(subscriptionID) }
+        }
+        return pair.stream
+    }
+
+    private func removeDiscardedConflictContinuation(_ id: UUID) {
+        discardedConflictContinuations.removeValue(forKey: id)
+    }
+
+    private func publishDiscardedConflict(_ conflict: CollectionConflict) {
+        for continuation in discardedConflictContinuations.values {
+            continuation.yield(conflict)
+        }
+    }
+
     func discard(_ conflictID: UUID) async throws {
         await bootstrapIfNeeded()
+        try performDiscard(conflictID)
+        publishConflictSnapshot()
+        await drainDispatchIfNeeded()
+    }
+
+    /*
+     * The one repair path. Automatic `.discard` and an application's explicit
+     * `discard(_:)` must not diverge: both need the same atomicity, the same
+     * successor-payload rebuild, and above all the same refusal to revert a row
+     * whose authoritative baseline was never observed.
+     */
+    private func performDiscard(_ conflictID: UUID) throws {
         do {
             try writeGate.withCriticalSection {
                 let context = ModelContext(modelContainer)
@@ -279,9 +331,6 @@ actor CollectionCoordinator<
             throw error
         }
         invalidateQueueContext()
-
-        publishConflictSnapshot()
-        await drainDispatchIfNeeded()
     }
 
     func setConnectivityState(_ state: CollectionConnectivityState) async {
@@ -300,7 +349,6 @@ actor CollectionCoordinator<
 
         switch state {
         case .offline:
-            cancelScheduledRetry()
             await transitionLifecycle(to: .offline, reason: "connectivity changed offline", errorMessage: nil)
         case .online:
             makeFailedTransactionsEligibleForReconnectRetry()
@@ -615,9 +663,9 @@ actor CollectionCoordinator<
             )
             switch configuration.dispatchWait {
             case .durablyQueued:
-                enqueueDispatchWithoutWaiting(ids: [liveTransaction.id])
+                enqueueDispatchWithoutWaiting()
             case .dispatchAttempted:
-                await enqueueDispatch(ids: [liveTransaction.id])
+                await enqueueDispatch()
             }
             return liveTransaction
         } catch {
@@ -745,43 +793,28 @@ actor CollectionCoordinator<
         debugEvents
     }
 
-    private func enqueueDispatch(ids: [UUID]) async {
-        appendPendingDispatch(ids: ids)
+    /*
+     * Ordering is a store-level invariant, so a collection never dispatches
+     * its own queue. Both paths hand the decision to the shared lane, which
+     * calls back into `laneDispatch(transactionID:)` when this collection owns
+     * the next transaction in store-wide sequence order.
+     *
+     * The waiting form is for `.dispatchAttempted`; the non-waiting form backs
+     * `.durablyQueued`, where a write returns once local state is durable and
+     * reaching the server is the lane's job. Callers that genuinely need the
+     * round trip await `CollectionTransaction.wait()`; tests force it with
+     * `flush()`.
+     */
+    private func enqueueDispatch() async {
         await drainDispatchIfNeeded()
     }
 
-    /*
-     * A write returns once its transaction is durably queued. Reaching the
-     * server is the outbox's job, not the caller's: draining inline made every
-     * local write wait for a round trip, which on a slow network turns an
-     * offline-capable write into a stall.
-     *
-     * Enqueueing stays synchronous so `pendingDispatchIDs` keeps call order;
-     * only the drain is handed to a task. A drain already in progress picks up
-     * the appended ids on its next loop, and the re-entrancy guard makes the
-     * extra task a no-op.
-     *
-     * Callers that genuinely need the round trip await
-     * `CollectionTransaction.wait()`; tests force a drain with `flush()`.
-     */
-    private func enqueueDispatchWithoutWaiting(ids: [UUID]) {
-        appendPendingDispatch(ids: ids)
+    private func enqueueDispatchWithoutWaiting() {
         Task { await self.drainDispatchIfNeeded() }
     }
 
-    private func appendPendingDispatch(ids: [UUID]) {
-        if ids.isEmpty == false {
-            cancelScheduledRetry()
-        }
-        for id in ids where pendingDispatchIDs.contains(id) == false {
-            pendingDispatchIDs.append(id)
-        }
-    }
-
     private func drainDispatchIfNeeded() async {
-        guard isDrainingDispatch == false else { return }
         guard connectivityState == .online else {
-            cancelScheduledRetry()
             trace(
                 .dispatchPausedOffline,
                 message: "dispatch paused while offline",
@@ -790,54 +823,39 @@ actor CollectionCoordinator<
             await transitionLifecycle(to: .offline, reason: "dispatch paused while offline", errorMessage: nil)
             return
         }
-        isDrainingDispatch = true
-        defer { isDrainingDispatch = false }
-
-        while true {
-            while pendingDispatchIDs.isEmpty == false {
-                let id = pendingDispatchIDs.removeFirst()
-                guard await processPendingTransaction(id: id) else { return }
-            }
-
-            let eligibleIDs = queue.eligibleDispatchTransactionIDs(
-                collectionID: collectionID,
-                now: Date()
-            )
-            .filter { pendingDispatchIDs.contains($0) == false }
-
-            guard eligibleIDs.isEmpty == false else {
-                scheduleNextRetryIfNeeded()
-                break
-            }
-
-            cancelScheduledRetry()
-            await transitionLifecycle(to: .replaying, reason: "eligible transactions scheduled for replay", errorMessage: nil)
-            trace(
-                .replayStarted,
-                message: "starting replay drain for eligible transactions",
-                metadata: ["transactionIDs": eligibleIDs.map(\.uuidString).joined(separator: ",")]
-            )
-            pendingDispatchIDs.append(contentsOf: eligibleIDs)
-        }
+        await dispatchLane.drain()
     }
 
-    private func processPendingTransaction(id: UUID) async -> Bool {
-        guard connectivityState == .online else { return true }
+    func laneDispatch(transactionID id: UUID) async -> CollectionDispatchOutcome {
+        guard connectivityState == .online else { return .skipped }
+        invalidateQueueContext()
         let transactionRecord = queue.fetchPendingTransaction(id: id, collectionID: collectionID)
-        guard let transactionRecord else { return true }
-        guard transactionRecord.status == .pending || transactionRecord.status == .failed else { return true }
-        guard transactionRecord.nextRetryAt.map({ $0 <= Date() }) ?? true else { return true }
+        guard let transactionRecord else { return .skipped }
+        guard transactionRecord.status == .pending || transactionRecord.status == .failed else { return .skipped }
+        guard transactionRecord.nextRetryAt.map({ $0 <= Date() }) ?? true else { return .skipped }
+        /*
+         * The lane orders submission, but it releases on server acceptance
+         * rather than on readback, so an earlier transaction for this key may
+         * still be `awaiting` or parked `conflicted`. Same-key work stays
+         * behind it; the lane steps past and keeps unrelated keys moving.
+         */
         guard queue.hasUnresolvedPredecessor(for: transactionRecord, collectionID: collectionID) == false else {
             trace(
-                .dispatchEnqueued,
+                .dispatchDeferred,
                 transactionID: id,
                 sequenceNumber: transactionRecord.sequenceNumber,
                 attemptCount: transactionRecord.attemptCount,
                 message: "deferred dispatch behind earlier same-key transaction",
                 metadata: transactionTraceMetadata(transactionRecord)
             )
-            return true
+            return .skipped
         }
+
+        await transitionLifecycle(
+            to: .replaying,
+            reason: "transaction scheduled by store dispatch lane",
+            errorMessage: nil
+        )
 
         let dispatch: PreparedDispatchGroup
         do {
@@ -852,7 +870,7 @@ actor CollectionCoordinator<
                 reason: "failed to persist submitted dispatch representation",
                 errorMessage: String(describing: error)
             )
-            return false
+            return .halted
         }
 
         let transaction = liveTransactions[dispatch.id]
@@ -943,7 +961,7 @@ actor CollectionCoordinator<
             }
         } catch {
             do {
-                try markDispatchGroupFailed(dispatch, error: error)
+                _ = try markDispatchGroupFailed(dispatch, error: error)
             } catch {
                 // The group remains in its last durable state (normally
                 // `sending`). Stop this drain: continuing with a stale queue
@@ -960,7 +978,7 @@ actor CollectionCoordinator<
                     reason: "failed to persist dispatch failure",
                     errorMessage: String(describing: error)
                 )
-                return false
+                return .halted
             }
 
             for representedTransactionID in dispatch.transactionIDs {
@@ -986,56 +1004,7 @@ actor CollectionCoordinator<
             )
             debug("failed dispatch for \(configuration.debugName) transaction \(dispatch.id): \(error)")
         }
-        return true
-    }
-
-    private func scheduleNextRetryIfNeeded(now: Date = Date()) {
-        guard connectivityState == .online else {
-            cancelScheduledRetry()
-            return
-        }
-        let nextRetryAt = queue.nextRetryAt(collectionID: collectionID, now: now)
-        guard let nextRetryAt else {
-            cancelScheduledRetry()
-            return
-        }
-        guard scheduledRetryAt != nextRetryAt else { return }
-
-        cancelScheduledRetry()
-        scheduledRetryAt = nextRetryAt
-        let delay = max(0, nextRetryAt.timeIntervalSince(now))
-        trace(
-            .retryScheduled,
-            message: "scheduled next failed transaction retry",
-            metadata: [
-                "nextRetryAt": isoString(nextRetryAt),
-                "delay": String(delay),
-            ]
-        )
-        let retrySleep = self.retrySleep
-        scheduledRetryTask = Task {
-            await retrySleep(delay)
-            guard Task.isCancelled == false else { return }
-            await self.scheduledRetryDidFire(expectedRetryAt: nextRetryAt)
-        }
-    }
-
-    private func scheduledRetryDidFire(expectedRetryAt: Date) async {
-        guard scheduledRetryAt == expectedRetryAt else { return }
-        scheduledRetryAt = nil
-        scheduledRetryTask = nil
-        trace(
-            .retryFired,
-            message: "scheduled retry fired",
-            metadata: ["expectedRetryAt": isoString(expectedRetryAt)]
-        )
-        await drainDispatchIfNeeded()
-    }
-
-    private func cancelScheduledRetry() {
-        scheduledRetryTask?.cancel()
-        scheduledRetryTask = nil
-        scheduledRetryAt = nil
+        return .dispatched
     }
 
     private func makeFailedTransactionsEligibleForReconnectRetry(now: Date = Date()) {
@@ -1060,18 +1029,11 @@ actor CollectionCoordinator<
         do {
             let sequenceNumber = try writeGate.withCriticalSection {
                 let context = ModelContext(modelContainer)
-                let transactions = try context.fetch(FetchDescriptor<PendingCollectionTransaction>())
-                    .filter { $0.collectionID == collectionID }
-                let maximumSequence = transactions.map(\.sequenceNumber).max() ?? -1
-                guard maximumSequence < Int.max else {
-                    throw CollectionError.transactionSequenceOverflow
-                }
-                let metadata = try fetchOrCreateCollectionMetadata(in: context)
-                let seededNext = max(metadata.nextTransactionSequence, maximumSequence + 1)
-                guard seededNext < Int.max else {
-                    throw CollectionError.transactionSequenceOverflow
-                }
-                metadata.nextTransactionSequence = seededNext + 1
+                // Store-wide, not collection-wide: the sequence is what orders
+                // a child behind its parent across collections. The write gate
+                // is shared by the store, so allocation and this commit are one
+                // critical section.
+                let seededNext = try CollectionDispatchLane.allocateSequenceNumber(in: context)
 
                 let pendingTransaction = PendingCollectionTransaction(
                     id: preparedTransaction.transactionID,
@@ -1298,7 +1260,7 @@ actor CollectionCoordinator<
     private func markDispatchGroupFailed(
         _ dispatch: PreparedDispatchGroup,
         error: Error
-    ) throws {
+    ) throws -> Bool {
         let nonRetriable = isNonRetriable(error)
         try updateDispatchGroup(dispatch) { transactions, mutations, materializer in
             let now = Date()
@@ -1323,9 +1285,65 @@ actor CollectionCoordinator<
             }
             try materializer.materialize(keys: dispatch.touchedKeys)
         }
-        if nonRetriable {
-            publishConflictSnapshot()
+        guard nonRetriable else { return false }
+
+        /*
+         * The intent is parked before this point, so a discard that cannot
+         * prove its baseline simply leaves it parked -- the safe outcome, not a
+         * special case. `quarantine` skips repair entirely and keeps the row.
+         */
+        if conflictDisposition(error) == .discard {
+            let parked = try? conflictSnapshot().first { $0.id == dispatch.id }
+            do {
+                try performDiscard(dispatch.id)
+                if let parked {
+                    publishDiscardedConflict(parked)
+                }
+                trace(
+                    .conflictDiscarded,
+                    transactionID: dispatch.id,
+                    sequenceNumber: dispatch.sequenceNumber,
+                    attemptCount: dispatch.attemptCount,
+                    message: "discarded permanently refused intent and repaired local rows",
+                    error: error,
+                    metadata: [
+                        "disposition": CollectionConflictDisposition.discard.rawValue,
+                        "keys": dispatch.touchedKeys.sorted().joined(separator: ","),
+                    ]
+                )
+                publishConflictSnapshot()
+                return true
+            } catch {
+                trace(
+                    .conflictParked,
+                    transactionID: dispatch.id,
+                    sequenceNumber: dispatch.sequenceNumber,
+                    attemptCount: dispatch.attemptCount,
+                    message: "kept refused intent parked because it cannot be safely discarded",
+                    error: error,
+                    metadata: [
+                        "disposition": CollectionConflictDisposition.discard.rawValue,
+                        "keys": dispatch.touchedKeys.sorted().joined(separator: ","),
+                    ]
+                )
+            }
+        } else {
+            trace(
+                .conflictParked,
+                transactionID: dispatch.id,
+                sequenceNumber: dispatch.sequenceNumber,
+                attemptCount: dispatch.attemptCount,
+                message: "quarantined permanently refused intent for inspection",
+                error: error,
+                metadata: [
+                    "disposition": CollectionConflictDisposition.quarantine.rawValue,
+                    "keys": dispatch.touchedKeys.sorted().joined(separator: ","),
+                ]
+            )
         }
+
+        publishConflictSnapshot()
+        return false
     }
 
     private func updateDispatchGroup(
@@ -1878,6 +1896,10 @@ actor CollectionCoordinator<
 
     private func isNonRetriable(_ error: Error) -> Bool {
         error is CollectionNonRetriableError
+    }
+
+    private func conflictDisposition(_ error: Error) -> CollectionConflictDisposition? {
+        (error as? CollectionNonRetriableError)?.disposition
     }
 
     private func trace(

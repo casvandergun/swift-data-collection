@@ -4,6 +4,16 @@ All notable package changes are tracked here by release.
 
 ## Unreleased - target v0.2.0
 
+- Added `CollectionConflictDisposition` to `CollectionNonRetriableError`. A handler now says whether a permanent refusal means the server judged the intent and the client lost (`.discard`, the default) or the content is still valid (`.quarantine`). Discard runs the same atomic repair as an explicit `discard(_:)`, including its refusal to revert a row whose authoritative baseline was never observed -- such a group parks exactly as quarantine would. This changes the previous behaviour, where every non-retriable failure parked until an application discarded it by hand.
+- Added `SwiftDataCollection.discardedConflicts`, a stream delivering each automatically discarded group once with the snapshot captured before repair. `conflictUpdates` reports only intent that is still parked, so it cannot carry a discard.
+- Added `conflictParked` and `conflictDiscarded` trace events.
+- Added store-wide mutation ordering. `SwiftDataCollectionStore` now owns a single durable FIFO dispatch lane that orders every collection's transactions by a store-wide sequence number and routes each back to its own collection's mutation handlers, so a child's write can no longer reach the server before the parent it references. Collections no longer schedule their own outbox.
+- Moved transaction sequence allocation from per-collection `CollectionMetadata` to a new store-wide `CollectionStoreMetadata` record, allocated inside the same critical section as the durable commit that consumes it. Add `CollectionStoreMetadata` to application schemas via `SwiftDataCollectionSchema.models(including:)`.
+- Made the collection write gate store-wide, so adapter application and collection commits serialize across the store rather than per collection.
+- The lane advances on outbound handler return rather than adapter readback, so later writes are not coupled to txid latency. Terminal `conflicted` transactions are stepped past instead of blocking the store, while same-key successors stay behind them as before.
+- A retryable transaction holds the lane until its backoff elapses, and replay holds behind an earlier transaction whose collection has not been created yet, so restart replay preserves the recorded write order.
+- Added the `dispatchDeferred` trace event for lane ordering decisions, and moved `replayStarted` to collection bootstrap where persisted work is actually loaded.
+
 - Added coordinated conflict repair backed by private per-dirty-key authoritative evidence and a deterministic materializer shared by the coordinator, Electric adapter, and Fetch adapter. SwiftData application models remain the only UI read/query layer.
 - Added durable conflict-group inspection through `conflicts()` and `conflictUpdates`, plus atomic `discard(_:)` that repairs visible rows and never-submitted successor payloads while preserving already-submitted request bodies.
 - Persisted monotonic transaction allocation, within-transaction mutation ordering, compacted dispatch-group membership, frozen submitted requests, and conflict occurrence metadata. Same-key successors remain blocked behind parked conflicts while unrelated keys continue.

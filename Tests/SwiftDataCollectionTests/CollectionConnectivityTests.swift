@@ -145,7 +145,7 @@ struct CollectionConnectivityTests {
             table: "todos",
             onInsert: { _ in
                 _ = await recorder.record()
-                throw CollectionNonRetriableError("validation failed")
+                throw CollectionNonRetriableError("validation failed", disposition: .quarantine)
             }
         )
 

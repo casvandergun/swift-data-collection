@@ -21,7 +21,10 @@ struct CollectionConflictTests {
             calls.append(mutation)
             if rejectNext {
                 rejectNext = false
-                throw CollectionNonRetriableError("server refused mutation")
+                throw CollectionNonRetriableError(
+                    "server refused mutation",
+                    disposition: .quarantine
+                )
             }
             return .immediate
         }

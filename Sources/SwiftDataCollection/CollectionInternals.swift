@@ -158,7 +158,6 @@ public final class CollectionMetadata {
     public var lastErrorMessage: String?
     public var lastReplayAt: Date?
     public var lastSyncedAt: Date?
-    package var nextTransactionSequence: Int = 0
 
     public init(
         collectionID: String,
@@ -301,34 +300,6 @@ struct CollectionMutationQueue {
         return ((try? context.fetch(FetchDescriptor<PendingCollectionMutation>())) ?? [])
             .filter { transactionIDs.contains($0.transactionID) }
             .sorted(by: Self.mutationIsEarlier)
-    }
-
-    func eligibleDispatchTransactionIDs(collectionID: String, now: Date) -> [UUID] {
-        fetchAllPendingTransactions(collectionID: collectionID)
-            .filter { transaction in
-                transaction.status == .pending ||
-                transaction.status == .failed && (transaction.nextRetryAt == nil || transaction.nextRetryAt! <= now)
-            }
-            .filter { transaction in
-                transaction.dispatchGroupID == nil || transaction.dispatchGroupID == transaction.id
-            }
-            .filter { transaction in
-                hasUnresolvedPredecessor(for: transaction, collectionID: collectionID) == false
-            }
-            .map(\.id)
-    }
-
-    func nextRetryAt(collectionID: String, now: Date) -> Date? {
-        fetchAllPendingTransactions(collectionID: collectionID)
-            .compactMap { transaction -> Date? in
-                guard transaction.status == .failed,
-                      let nextRetryAt = transaction.nextRetryAt,
-                      nextRetryAt > now else {
-                    return nil
-                }
-                return nextRetryAt
-            }
-            .min()
     }
 
     func hasUnresolvedPredecessor(
@@ -993,11 +964,39 @@ public enum CollectionError: Error, Sendable {
     case transactionSequenceOverflow
 }
 
+/// What should happen to locally materialized intent that the server has
+/// permanently refused.
+///
+/// A single "permanent failure" bit is not enough to decide this. A server that
+/// evaluated the intent and rejected it on the merits has told you the client
+/// lost, and keeping that intent forever only accumulates work a human must
+/// clear. A 401 during token refresh, a bad deploy answering 400, or a client
+/// serialization bug look identical at the status-code level but describe valid
+/// content that should survive. Mapping every 4xx to `.discard` is the mistake
+/// this type exists to make visible.
+public enum CollectionConflictDisposition: String, Sendable, Hashable, Codable {
+    /// The server refused the intent on the merits. Drop it and repair the
+    /// visible row from retained authoritative evidence.
+    ///
+    /// Repair still requires proof: when the baseline for a touched key is
+    /// unknown, the group parks as if quarantined rather than reverting a row
+    /// whose authoritative state was never observed.
+    case discard
+    /// Permanently failed, but the content is valid. Retain the intent and its
+    /// materialized row for inspection through `conflicts()`.
+    case quarantine
+}
+
 public struct CollectionNonRetriableError: Error, Sendable, CustomStringConvertible {
     public let message: String
+    public let disposition: CollectionConflictDisposition
 
-    public init(_ message: String) {
+    public init(
+        _ message: String,
+        disposition: CollectionConflictDisposition = .discard
+    ) {
         self.message = message
+        self.disposition = disposition
     }
 
     public var description: String { message }

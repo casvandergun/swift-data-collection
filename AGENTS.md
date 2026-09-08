@@ -27,12 +27,14 @@ The project is intentionally SwiftData-first:
 - Do port TanStack DB’s transaction semantics and mutation-handling discipline.
 - Each collection is its own state engine for lifecycle and mutation coordination, but not for row storage.
 - `SwiftDataCollectionStore` is the shared-infrastructure entry point.
-- Scheduling is currently per collection, not globally FIFO across all collections; `ROADMAP.md` is the source of truth for any planned cross-collection scheduler or dependency model.
+- Outbound dispatch is scheduled store-wide: one durable FIFO lane orders every collection's transactions by a store-wide sequence number and routes each back to its own collection's handlers. `ROADMAP.md` is the source of truth for any planned dependency-aware refinement.
 
 ## Responsibilities By Type
 
 - `SwiftDataCollectionStore`
-  Shared dependencies, collection factory, foreground wakeups, connectivity monitoring, and managed-model registration.
+  Shared dependencies, collection factory, foreground wakeups, connectivity monitoring, managed-model registration, and the shared write gate.
+- `CollectionDispatchLane`
+  Store-wide durable FIFO dispatch scheduler and transaction-sequence allocator. Owns the single retry timer.
 - `SwiftDataCollection<Model, ID>`
   Public API for one collection. Thin facade over a coordinator and subscription.
 - `CollectionCoordinator<Model, ID>`
@@ -62,9 +64,10 @@ The project is intentionally SwiftData-first:
   - `update + update -> merged update`
   - `update + delete -> delete`
 - The outbox is transaction-first, not mutation-first.
+- Dispatch order is store-wide, not per collection. The lane releases on outbound handler return, not on adapter readback, and steps past terminal `conflicted` work so a parked refusal never stalls the store.
 - Completion is driven by observed Electric txids.
 - Outbound handler execution is paused while offline; local optimistic writes remain durable and replay when connectivity returns.
-- Retryable failures use bounded exponential backoff. `CollectionNonRetriableError` marks local transaction state conflicted instead of retrying.
+- Retryable failures use bounded exponential backoff. `CollectionNonRetriableError` carries a `CollectionConflictDisposition`: `.discard` (default) abandons the intent through the shared atomic repair path and reports it on `discardedConflicts`, `.quarantine` parks it for inspection. Discard never reverts a row whose authoritative baseline is unknown; it parks instead.
 
 ## SwiftData Guidance
 

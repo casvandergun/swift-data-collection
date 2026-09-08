@@ -124,6 +124,7 @@ public enum CollectionTraceEventKind: String, Sendable, Codable, Hashable {
     case mutationMerged
     case transactionPersisted
     case dispatchEnqueued
+    case dispatchDeferred
     case dispatchStarted
     case handlerInvoked
     case handlerReturned
@@ -132,6 +133,8 @@ public enum CollectionTraceEventKind: String, Sendable, Codable, Hashable {
     case shapeBatchApplied
     case transactionCompleted
     case transactionFailed
+    case conflictParked
+    case conflictDiscarded
     case stagedInsertCreated
     case stagedInsertNoOp
     case stagedInsertUpdated
@@ -287,14 +290,14 @@ public struct CollectionTraceEvent: Sendable, Hashable {
 
     var level: CollectionDebugLevel {
         switch kind {
-        case .transactionFailed:
+        case .transactionFailed, .conflictParked:
             .error
         case .transactionCompleted, .shapeBatchApplied:
             .info
         case .stagedInsertCreated, .stagedInsertUpdated, .stagedInsertPublished,
              .stagedInsertDiscarded, .stagedInsertResolved:
             .info
-        case .handlerReturned, .awaiting:
+        case .handlerReturned, .awaiting, .conflictDiscarded:
             .info
         case .bootstrapStarted, .bootstrapCompleted, .lifecycleChanged,
              .replayScheduled, .replayStarted, .retryScheduled, .retryFired,
@@ -302,8 +305,8 @@ public struct CollectionTraceEvent: Sendable, Hashable {
              .awaitedTokensRegistered, .adapterBatchObserved, .pendingStateRefreshed:
             .debug
         case .transactionStarted, .optimisticMutationRecorded, .mutationMerged,
-             .transactionPersisted, .dispatchEnqueued, .dispatchStarted,
-             .handlerInvoked, .mutationResolved:
+             .transactionPersisted, .dispatchEnqueued, .dispatchDeferred,
+             .dispatchStarted, .handlerInvoked, .mutationResolved:
             .debug
         case .stagedInsertNoOp, .stagedDeletePreserved:
             .debug
