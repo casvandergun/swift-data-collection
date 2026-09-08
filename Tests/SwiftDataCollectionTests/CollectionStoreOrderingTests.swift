@@ -481,7 +481,90 @@ struct CollectionStoreOrderingTests {
         // both submits "Revised" early and drops the third dispatch entirely.
         #expect(await log.value() == ["insert:First", "intervening", "update:Revised"])
     }
+
+    /// The one path that could still reorder: a handler fails, and writing that
+    /// failure down fails too. The group stays durably `sending`, owned by
+    /// nobody, and stepping past it would let later work overtake it.
+    @Test("A dispatch abandoned by a failed failure-write still holds the lane")
+    func abandonedSendingDispatchHoldsTheLane() async throws {
+        let log = HandlerLog()
+        let saver = FailFirstFailureWrite()
+        let container = try makeTestContainer()
+        let store = SwiftDataCollectionStore(
+            modelContainer: container,
+            commitSave: { context in try saver.save(context) }
+        )
+
+        let parents = try await store.collection(
+            TestTodo.self,
+            identifier: testTodoIdentifier,
+            table: "todos",
+            onInsert: { _ in
+                await log.log("parent-attempt")
+                throw TestTransientError()
+            }
+        )
+        let children = try await store.collection(
+            TestEvent.self,
+            identifier: testEventIdentifier,
+            table: "events",
+            onInsert: { _ in
+                await log.log("child")
+                return .immediate
+            }
+        )
+
+        _ = try await parents.insert {
+            TestTodo(id: "moment-1", projectID: "project-a", title: "Moment")
+        }
+        _ = try await children.insert {
+            TestEvent(id: "recording-1", title: "Recording", startTime: Date(timeIntervalSince1970: 0))
+        }
+
+        // The parent's failure cannot be recorded, so its dispatch is abandoned
+        // with the group left `sending`, owned by nobody.
+        await store.flush()
+        #expect(saver.failedWrites() == 1)
+
+        // The lane reclaims it rather than stepping past, so the child stays
+        // behind it instead of reaching the server first.
+        await store.flush()
+        try await Task.sleep(nanoseconds: 150_000_000)
+        #expect(await log.value() == ["parent-attempt"])
+
+        let recovered = try #require(
+            ModelContext(container).fetch(FetchDescriptor<PendingCollectionTransaction>())
+                .first { $0.modelName == "SwiftDataCollectionTests.TestTodo" }
+        )
+        #expect(recovered.status == .failed)
+    }
 }
+
+/// Fails the first commit that would record a transaction failure, stranding
+/// that dispatch in `sending`.
+private final class FailFirstFailureWrite: @unchecked Sendable {
+    private let lock = NSLock()
+    private var failures = 0
+
+    func save(_ context: ModelContext) throws {
+        let transactions = try context.fetch(FetchDescriptor<PendingCollectionTransaction>())
+        let recordsFailure = transactions.contains { $0.status == .failed }
+        lock.lock()
+        let shouldFail = recordsFailure && failures == 0
+        if shouldFail { failures += 1 }
+        lock.unlock()
+        if shouldFail { throw FailureWriteError() }
+        try context.save()
+    }
+
+    func failedWrites() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return failures
+    }
+}
+
+private struct FailureWriteError: Error {}
 
 private struct TestTransientError: Error {}
 

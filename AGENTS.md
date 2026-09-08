@@ -66,6 +66,7 @@ The project is intentionally SwiftData-first:
 - The outbox is transaction-first, not mutation-first.
 - `CollectionTransactionOrder` is the single definition of durable transaction ordering. The lane, the same-key barrier, the outbox queue, and overlay materialization all sort through it; do not reimplement the comparison.
 - The lane steps past a transaction that cannot run, but holds for a collection that cannot run. Confusing the two reorders every transaction in the paused collection.
+- A `sending` record the lane observes is never in flight, because the lane is the sole dispatcher and drains serially. Treat it as a crash remnant (bootstrap replays it) or as a dispatch abandoned before it could record its own failure (its coordinator reclaims it). Never step past one.
 - Dispatch order is store-wide, not per collection. The lane releases on outbound handler return, not on adapter readback, and steps past terminal `conflicted` work so a parked refusal never stalls the store.
 - Completion is driven by observed Electric txids.
 - Outbound handler execution is paused while offline; local optimistic writes remain durable and replay when connectivity returns.

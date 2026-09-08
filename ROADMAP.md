@@ -78,7 +78,6 @@ Do not use `v0.1.3` for the current offline connectivity work unless the release
 
 ### Scheduling
 
-- Close the abandoned-`sending` ordering gap. The lane is the sole dispatcher and drains serially, so any `sending` entry it observes at the top of a pass is by construction not in flight: it is either a crash remnant awaiting bootstrap or a group abandoned by a failed failure-write. The lane should therefore hold rather than step past, and ask the owning coordinator to reclaim the group -- resetting it the way bootstrap does -- holding if that persistence also fails, since proceeding without knowing whether the work reached the server is what breaks the guarantee.
 - Scope explicit transaction dependencies (`dependsOnTransactionIDs` / `dependsOnKeys`) or dependency-aware lanes if head-of-line blocking in the store-wide lane becomes a measured problem.
 
 ### Retry And Outbox Operations
@@ -160,7 +159,7 @@ The Swift implementation should match TanStack's behavior where it maps cleanly 
 - The automated confidence bar is restart-grade persistence coverage plus high-fidelity protocol-contract tests, not a full live backend E2E lane.
 - Dynamic headers and parameters are not yet supported.
 - Postgres coercion coverage is still incomplete.
-- Ordering is not absolute across a double failure. If a handler fails and persisting that failure also fails, the dispatch is abandoned with the group left durably `sending`. Its collection is registered, so the lane treats it as a dispatch the coordinator still owns and steps past it, letting later transactions overtake it until the next relaunch resets it for replay. Reaching it requires a SwiftData commit failure on the failure-recording path, so it is rare, and it did not cause the incident that motivated the store-wide lane.
+- A dispatch abandoned by a failed failure-write is recovered as a failed attempt with backoff, so it keeps its place in the order. Its handler may already have reached the server, so recovery replays under the same at-least-once contract as restart replay.
 - A slow or retrying transaction holds every later transaction in the store behind it. Dependency-aware lanes are deferred until measured head-of-line blocking justifies the persisted dependency graph.
 - The lane holds, rather than reordering, whenever earlier work cannot be dispatched: its collection is offline, its collection has not been created yet, or a persisted `sending` record is waiting for its collection to bootstrap.
 - Replay holds behind an earlier pending transaction whose collection has not been created yet. An application that permanently stops creating a collection with unresolved outbox work must discard that work to release the lane.

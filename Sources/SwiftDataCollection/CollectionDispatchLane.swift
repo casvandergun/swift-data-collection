@@ -49,6 +49,27 @@ package enum CollectionDispatchOutcome: Sendable, Hashable {
     case halted
 }
 
+/// What happened to a `sending` group the lane found nobody working on.
+package enum CollectionReclaimOutcome: Sendable, Hashable {
+    /// Recorded as a failed attempt with backoff. It re-enters ordering.
+    case reclaimed
+    /// Not this coordinator's to reset -- a crash remnant its bootstrap owns,
+    /// or a dispatch it is still running. Hold; whoever owns it drains again.
+    case deferred
+    /// The reset could not be persisted -- the same failure that stranded it.
+    case unreclaimable
+}
+
+/// Marks a dispatch whose own failure could not be written down.
+///
+/// The handler already failed; only the record of it was lost, so the group is
+/// recorded as a failed attempt and retried rather than replayed immediately.
+public struct CollectionAbandonedDispatchError: Error, Sendable, CustomStringConvertible {
+    public var description: String {
+        "dispatch was abandoned before its failure could be persisted"
+    }
+}
+
 package actor CollectionDispatchLane {
     private struct Entry {
         let id: UUID
@@ -157,7 +178,7 @@ package actor CollectionDispatchLane {
                 // Its collection has not bootstrapped, so nothing has reset it
                 // for replay yet and the lane cannot know whether the work
                 // reached the server. Hold; bootstrap drains again.
-                guard runtimesByCollectionID[head.collectionID] != nil else {
+                guard let runtime = runtimesByCollectionID[head.collectionID] else {
                     trace(
                         .dispatchDeferred,
                         entry: head,
@@ -166,10 +187,39 @@ package actor CollectionDispatchLane {
                     )
                     return
                 }
-                // A registered collection already reset its crash remnants, so
-                // this belongs to a dispatch the coordinator still owns.
-                steppedPast.insert(head.id)
-                continue
+                /*
+                 * The lane is the sole dispatcher and drains serially, so a
+                 * `sending` entry seen here is never one this lane has in
+                 * flight: a dispatch failed and could not record that it had.
+                 * Stepping past would let later work overtake it, so ask its
+                 * collection to record the failure instead.
+                 */
+                switch await runtime.reclaimAbandonedDispatch(transactionID: head.id) {
+                case .reclaimed:
+                    trace(
+                        .dispatchDeferred,
+                        entry: head,
+                        message: "reclaimed an abandoned in-flight dispatch and kept its place in the order"
+                    )
+                    steppedPast.removeAll()
+                    continue
+                case .deferred:
+                    // Holding is the only safe answer: the outcome is unknown,
+                    // and whoever owns the reset will drain again.
+                    trace(
+                        .dispatchDeferred,
+                        entry: head,
+                        message: "lane holding behind in-flight work its collection has not released"
+                    )
+                    return
+                case .unreclaimable:
+                    trace(
+                        .dispatchDeferred,
+                        entry: head,
+                        message: "lane holding behind in-flight work whose state could not be reset"
+                    )
+                    return
+                }
             }
 
             if let retryAt = head.nextRetryAt, retryAt > Date() {

@@ -16,6 +16,8 @@ package protocol CollectionRuntime: Actor {
     /// store-level invariant, and a collection that drained itself could
     /// overtake an earlier transaction in another collection.
     func laneDispatch(transactionID: UUID) async -> CollectionDispatchOutcome
+    /// Recovers a `sending` group this collection is no longer dispatching.
+    func reclaimAbandonedDispatch(transactionID: UUID) async -> CollectionReclaimOutcome
 }
 
 actor CollectionCoordinator<
@@ -44,6 +46,8 @@ actor CollectionCoordinator<
     private var remainingTokensByTransactionID: [UUID: Set<String>] = [:]
     private var awaitingRefreshTransactionIDs: Set<UUID> = []
     private var connectivityState: CollectionConnectivityState
+    private var inFlightDispatchIDs: Set<UUID> = []
+    private var abandonedDispatchIDs: Set<UUID> = []
     private var debugEvents: [String] = []
     private var conflictContinuations: [
         UUID: AsyncThrowingStream<[CollectionConflict], any Error>.Continuation
@@ -881,6 +885,13 @@ actor CollectionCoordinator<
             return .halted
         }
 
+        // The group is durably `sending` from here until this method records an
+        // outcome. If recording that outcome itself fails, the state is
+        // stranded, and only this set distinguishes stranded work from work
+        // still being dispatched.
+        inFlightDispatchIDs.formUnion(dispatch.transactionIDs)
+        defer { inFlightDispatchIDs.subtract(dispatch.transactionIDs) }
+
         let transaction = liveTransactions[dispatch.id]
             ?? CollectionTransaction(id: dispatch.id, collectionID: collectionID)
         liveTransactions[dispatch.id] = transaction
@@ -975,6 +986,7 @@ actor CollectionCoordinator<
                 // `sending`). Stop this drain: continuing with a stale queue
                 // context can spin forever and/or invoke a handler twice.
                 invalidateQueueContext()
+                abandonedDispatchIDs.insert(dispatch.id)
                 debug("failed to persist dispatch failure for \(configuration.debugName): \(error)")
                 for representedTransactionID in dispatch.transactionIDs {
                     if let liveTransaction = liveTransactions.removeValue(forKey: representedTransactionID) {
@@ -1024,6 +1036,72 @@ actor CollectionCoordinator<
             debug("failed dispatch for \(configuration.debugName) transaction \(dispatch.id): \(error)")
         }
         return .dispatched
+    }
+
+    /*
+     * A dispatch whose handler failed and whose failure could not be written
+     * down leaves the group durably `sending`, owned by nobody. The lane cannot
+     * step past it without letting later work overtake it, so it asks the
+     * owning collection to record the failure it could not record before.
+     *
+     * This records a failed attempt with normal backoff rather than resetting
+     * to `pending`. A persistent commit failure would otherwise loop straight
+     * back into the handler.
+     */
+    func reclaimAbandonedDispatch(transactionID id: UUID) async -> CollectionReclaimOutcome {
+        /*
+         * Only a dispatch this coordinator abandoned is its to reclaim. Any
+         * other `sending` record is a crash remnant that bootstrap rewrites to
+         * `pending`; rewriting it here as a failed attempt would push a replay
+         * that should run now behind a retry delay.
+         */
+        guard abandonedDispatchIDs.contains(id) else { return .deferred }
+        guard inFlightDispatchIDs.contains(id) == false else { return .deferred }
+
+        let error = CollectionAbandonedDispatchError()
+        do {
+            let reclaimed = try writeGate.withCriticalSection {
+                let context = ModelContext(modelContainer)
+                let members = try context.fetch(FetchDescriptor<PendingCollectionTransaction>())
+                    .filter { $0.collectionID == collectionID }
+                    .filter { ($0.dispatchGroupID ?? $0.id) == id }
+                guard members.contains(where: { $0.status == .sending }) else {
+                    return false
+                }
+
+                let now = Date()
+                let memberIDs = Set(members.map(\.id))
+                let mutations = try context.fetch(FetchDescriptor<PendingCollectionMutation>())
+                    .filter { memberIDs.contains($0.transactionID) }
+                for member in members where member.status == .sending {
+                    member.markFailed(error, retryPolicy: retryPolicy, now: now)
+                }
+                for mutation in mutations where mutation.status == .sending {
+                    mutation.markFailed(error, retryPolicy: retryPolicy, now: now)
+                }
+                try makeMaterializer(in: context).materialize(keys: Set(mutations.map(\.targetKey)))
+                try commitSave(context)
+                return true
+            }
+            invalidateQueueContext()
+            guard reclaimed else {
+                // Something already moved it out of `sending`.
+                abandonedDispatchIDs.remove(id)
+                return .deferred
+            }
+            trace(
+                .transactionFailed,
+                transactionID: id,
+                message: "recorded the failure of an abandoned dispatch",
+                error: error
+            )
+            abandonedDispatchIDs.remove(id)
+            return .reclaimed
+        } catch {
+            invalidateQueueContext()
+            debug("failed to reclaim abandoned dispatch for \(configuration.debugName): \(error)")
+            return .unreclaimable
+        }
     }
 
     private func makeFailedTransactionsEligibleForReconnectRetry(now: Date = Date()) {
