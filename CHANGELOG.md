@@ -4,6 +4,7 @@ All notable package changes are tracked here by release.
 
 ## Unreleased - target v0.3.0
 
+- Keep optimistic deletes in `.pendingDelete` while a retryable delete attempt is failed, so deleted rows remain hidden until the intent succeeds or is discarded.
 - Added `CollectionConflictDisposition` to `CollectionNonRetriableError`. A handler now says whether a permanent refusal means the server judged the intent and the client lost (`.discard`, the default) or the content is still valid (`.quarantine`). Discard runs the same atomic repair as an explicit `discard(_:)`, including its refusal to revert a row whose authoritative baseline was never observed -- such a group parks exactly as quarantine would. This changes the previous behaviour, where every non-retriable failure parked until an application discarded it by hand.
 - Added `SwiftDataCollection.discardedConflicts`, a stream delivering each automatically discarded group once with the snapshot captured before repair. `conflictUpdates` reports only intent that is still parked, so it cannot carry a discard.
 - Added `conflictParked` and `conflictDiscarded` trace events.

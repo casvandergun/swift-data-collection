@@ -419,10 +419,13 @@ package struct CollectionMaterializer<
             }
         } else if overlays.contains(where: { $0.mutation.status == .conflicted }) {
             model.collectionSyncState = .conflicted
+        } else if overlays.contains(where: { $0.mutation.operation == .delete }) {
+            // A failed delete is still the user's active intent and remains
+            // queued for retry. Keep the optimistic tombstone state so UI
+            // lists do not resurrect content during the retry window.
+            model.collectionSyncState = .pendingDelete
         } else if overlays.contains(where: { $0.mutation.status == .failed }) {
             model.collectionSyncState = .error
-        } else if overlays.contains(where: { $0.mutation.operation == .delete }) {
-            model.collectionSyncState = .pendingDelete
         } else if overlays.contains(where: { $0.mutation.operation == .create }) {
             model.collectionSyncState = .pendingCreate
         } else {

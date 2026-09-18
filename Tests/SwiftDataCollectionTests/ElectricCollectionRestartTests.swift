@@ -294,7 +294,7 @@ struct ElectricCollectionRestartTests {
         #expect(resolved.status == .resolved)
     }
 
-    @Test("Failed optimistic delete stays visible and retryable after restart")
+    @Test("Failed optimistic delete stays hidden and retryable after restart")
     func failedDeleteRemainsRecoverableAfterRestart() async throws {
         enum SampleError: Error { case sendFailed }
 
@@ -336,7 +336,7 @@ struct ElectricCollectionRestartTests {
 
         let reopenedContext = ModelContext(reopenedContainer)
         let row = try #require(reopenedContext.fetch(testTodoIdentifier.fetchDescriptor(for: "todo-1")).first)
-        #expect(row.collectionSyncState == .error)
+        #expect(row.collectionSyncState == .pendingDelete)
         #expect(row.collectionPendingMutationCount == 1)
 
         let pending = try #require(reopenedContext.fetch(FetchDescriptor<ElectricPendingMutation>()).first)

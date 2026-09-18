@@ -568,10 +568,12 @@ struct CollectionMutationReconciler {
             }
         } else if pending.contains(where: { $0.status == .conflicted }) {
             existing.collectionSyncState = .conflicted
+        } else if pending.contains(where: { $0.operation == .delete }) {
+            // A retryable delete is still an active optimistic tombstone.
+            // Keep it hidden until the delete resolves or is discarded.
+            existing.collectionSyncState = .pendingDelete
         } else if pending.contains(where: { $0.status == .failed }) {
             existing.collectionSyncState = .error
-        } else if pending.contains(where: { $0.operation == .delete }) {
-            existing.collectionSyncState = .pendingDelete
         } else if pending.contains(where: { $0.operation == .create }) {
             existing.collectionSyncState = .pendingCreate
         } else {

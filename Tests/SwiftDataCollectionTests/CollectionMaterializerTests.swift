@@ -155,6 +155,29 @@ struct CollectionMaterializerTests {
         #expect(row.collectionPendingMutationCount == 1)
     }
 
+    @Test("failed local delete remains pending deletion while retryable")
+    func failedSoftDeleteRemainsPending() throws {
+        let container = try makeTestContainer()
+        let context = ModelContext(container)
+        context.insert(TestTodo(id: "1", projectID: "p", title: "Recoverable"))
+        let materializer = makeMaterializer(context)
+        try materializer.captureBaselineIfNeeded(for: "1", operation: .delete)
+        try insertOverlay(
+            context: context,
+            sequence: 1,
+            operation: .delete,
+            payload: [:],
+            changedFields: [],
+            status: .failed
+        )
+
+        try materializer.materialize(key: "1")
+
+        let row = try #require(try context.fetch(testTodoIdentifier.fetchDescriptor(for: "1")).first)
+        #expect(row.collectionSyncState == .pendingDelete)
+        #expect(row.collectionPendingMutationCount == 1)
+    }
+
     @Test("server absence below an update does not resurrect a visible row")
     func absenceBelowUpdate() throws {
         let container = try makeTestContainer()
