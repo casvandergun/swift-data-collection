@@ -11,73 +11,31 @@ The package is intentionally split into two deliverables:
 
 ## Current Status
 
-Latest released version: `v0.1.2`.
+Latest released version: `v0.4.0`.
 
-`main` contains unreleased `v0.3.0`-targeted hardening work: durable staged inserts, serialized managed writes, retry bounds, network-aware offline pause/resume, reconnect retry reset, and coordinated permanent-refusal inspection and repair.
+v0.4.0 adds a store-wide `willSave` hook, so applications derive local state from the rows each save writes instead of rescanning after every batch, and terminal `close()` for session-scoped stores. v0.3.0 introduced store-wide dispatch ordering; v0.2.0 added offline pause/resume, durable staged inserts, and coordinated conflict inspection and repair. See `CHANGELOG.md` for details.
 
 The collection path is restart-grade and offline-aware. Transaction durability is transaction-first on disk, optimistic deletes are recoverable, retry/replay is autonomous, network loss pauses outbound dispatch, reconnect resumes eligible work, one managed shape or collection per model type is enforced, and the release-grade evidence bar is in place.
 
 The Electric adapter contains the old read-side SwiftData sync pieces, so there is no separate `ElectricSwiftData` module in this package.
 
-## v0.3.0
+## Release Checklist
 
-### Release Goal
+- Review new public API names and access levels.
+- Run the full Swift test suite with the Xcode toolchain.
+- Update README examples if any public API names change.
+- Move the release's entries under a dated version heading in `CHANGELOG.md`, and update "Current Status" above.
+- Tag and publish the release.
 
-Ship the offline transaction hardening already on `main` together with coordinated conflict inspection and repair, including its schema migration and consumer upgrade guidance. Decide the next scheduling API boundary.
-
-### Included From Current `main`
-
-- Explicit terminal store close for session-scoped consumers, preserving durable work while retiring observers, dispatch and read subscriptions.
-
-- Bounded retry delays and safe attempt-count saturation.
-- Injectable connectivity monitoring with an `NWPathMonitor` default.
-- Offline pause/resume for outbound outbox dispatch.
-- Immediate retry eligibility when connectivity returns.
-- `CollectionNonRetriableError` for permanent handler failures, carrying a `CollectionConflictDisposition`: `.discard` (default) abandons the intent through the shared atomic repair path and reports it on `discardedConflicts`, `.quarantine` parks it for inspection. A discard whose authoritative baseline is unknown parks rather than guessing.
-- Documentation of TanStack offline-transaction parity and intentional SwiftData/Electric differences.
-- Durable `.stagedCreate` rows with stage, local update, publish, and discard operations.
-- Store-wide serialization of managed coordinator and adapter SwiftData writes, so transaction-sequence allocation and the commit that consumes it share one critical section.
-- Adapter-driven resolution of staged rows, with staged work preserved during deletes and resets.
-- A single write-return contract: mutations return once durably queued, with `flush()` for explicit drains and `CollectionTransaction.wait()` for the final outcome. `CollectionDispatchWait` is removed.
-- Private per-dirty-key authoritative evidence and deterministic overlay materialization shared by the coordinator, Electric, and Fetch without adding a UI read/query layer.
-- Monotonic transaction sequencing, stable compacted dispatch groups, frozen retry requests, and same-key conflict barriers.
-- Store-wide FIFO dispatch ordering across all collections, with a store-wide sequence allocator, a shared write gate, and a single retry timer. Resolves the cross-collection scheduling decision in favour of a store-level scheduler; explicit dependency lanes remain deferred.
-- Public conflict snapshots/update streams and atomic group discard with successor payload repair.
-- A schema-composition helper and startup validation for runtime metadata; v0.3.0 uses an explicit hard schema/source migration.
-- Distinct row states: `.error` for retryable failures and `.conflicted` for permanently refused intent.
-- Canonical Electric key normalization keeps backend UUID spelling differences from breaking row materialization or txid reconciliation.
-- A store-wide `willSave` hook that runs before every store save, so applications derive local state from the rows being written instead of rescanning after each batch.
+## Next
 
 ### Planned Decisions
 
 - Do not add `waitForDispatch()` without a concrete caller that needs the midpoint -- a server that
   accepts a write well before the authoritative row reappears through sync. It exposes an internal
   scheduling phase, does not throw the dispatch failure, and callers wanting certainty need `wait()`
-  anyway. The lane's `drain(untilAttempted:)` stays private, supporting `.dispatchAttempted` until it
-  is removed.
+  anyway.
 - Define named idempotency-key ergonomics for mutation handlers. The current fallback is `context.transaction.id`.
-- Define public outbox/status inspection APIs, including pending/running counts and queued transaction summaries.
-
-### Release Checklist
-
-- Review new public API names and access levels.
-- Run the full Swift test suite with the Xcode toolchain.
-- Update README examples if any public API names change.
-- Tag and publish `v0.2.0`.
-
-## Optional v0.1.3 Patch Lane
-
-Use `v0.1.3` only for a narrowly scoped patch that should ship before `v0.2.0`.
-
-Appropriate `v0.1.3` work:
-
-- critical bug fixes
-- documentation corrections for released APIs
-- test-only or packaging-only fixes that do not introduce new API surface
-
-Do not use `v0.1.3` for the current offline connectivity work unless the release strategy changes; that work is targeted at `v0.2.0`.
-
-## v0.3.x
 
 ### Scheduling
 
@@ -85,14 +43,14 @@ Do not use `v0.1.3` for the current offline connectivity work unless the release
 
 ### Retry And Outbox Operations
 
-- Scope a `beforeRetry`-style hook against the v0.2.0 repair and frozen-request contracts. Dropping work must use materialization; already-submitted request bodies must remain stable.
+- Scope a `beforeRetry`-style hook against the existing repair and frozen-request contracts. Dropping work must use materialization; already-submitted request bodies must remain stable.
 - Scope durable retention for resolved/discarded delivery records. Automatic `.discard` now produces these routinely, so retention needs a policy sooner than when every refusal parked. Age alone must not delete unresolved intent or its base.
-- Use the v0.2.0 conflict inspection/discard interface as the first outbox administration surface. Defer generic removal/clear operations until they can share its atomic repair path.
+- Use the conflict inspection/discard interface as the first outbox administration surface. Defer generic removal/clear operations until they can share its atomic repair path.
 
 ### Diagnostics And Status
 
 - Add a programmatic debug/trace event stream in addition to log sinks.
-- Expose first-class status snapshots such as last sync age, current replay state, current connectivity state, and pending outbox counts.
+- Expose first-class status snapshots such as last sync age, current replay state, current connectivity state, pending/running outbox counts, and queued transaction summaries.
 
 ### Adapter And Type Ergonomics
 

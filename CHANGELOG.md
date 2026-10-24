@@ -2,14 +2,19 @@
 
 All notable package changes are tracked here by release.
 
-## Unreleased - target v0.3.0
+## v0.4.0 - 2026-10-24
+
+An additive release. No source or schema migration: new parameters have defaults, and no persisted model changed since v0.3.0.
 
 - Added a store-wide `willSave` hook (`CollectionWillSaveHandler`) to `SwiftDataCollectionStore`. It runs in the writing context, inside the write gate, immediately before every save the store makes: local mutations, rollbacks, discards, staged writes, Electric and Fetch adapter batches, shape-only subscriptions, and txid confirmation. Changes it makes join that save, so an application can keep derived local state -- such as SwiftData relationships rebuilt from foreign-key columns -- consistent with exactly the rows being written, without rescanning its store after each batch. A throw aborts the write like a failed save; in an adapter batch that leaves the rows and the checkpoint unsaved. The existing post-save `onApply` is unchanged.
-- Shape-only subscriptions created through `SwiftDataCollectionStore.shape(...)` now apply batches inside the store's write gate, like collections, so they serialize with collection commits and run the `willSave` hook.
-
 - Added terminal `SwiftDataCollectionStore.close()`: stops foreground/connectivity observers, cancels retry scheduling, drains the active outbound handler and closes registered collections/shapes without removing durable rows or outbox work. A subsequent session uses a new store; closed stores reject new registrations.
+- Kept optimistic deletes in `.pendingDelete` while a retryable delete attempt is failed, so deleted rows remain hidden until the intent succeeds or is discarded.
+- **Behaviour change:** shape-only subscriptions created through `SwiftDataCollectionStore.shape(...)` now apply batches inside the store's write gate, like collections, so they serialize with collection commits and run the `willSave` hook.
 
-- Keep optimistic deletes in `.pendingDelete` while a retryable delete attempt is failed, so deleted rows remain hidden until the intent succeeds or is discarded.
+## v0.3.0 - 2026-09-09
+
+Store-wide dispatch ordering. Adds the private `CollectionStoreMetadata` model (registered by `SwiftDataCollectionSchema.models(including:)`) and removes `CollectionDispatchWait`; see the entries below for the source changes.
+
 - Added `CollectionConflictDisposition` to `CollectionNonRetriableError`. A handler now says whether a permanent refusal means the server judged the intent and the client lost (`.discard`, the default) or the content is still valid (`.quarantine`). Discard runs the same atomic repair as an explicit `discard(_:)`, including its refusal to revert a row whose authoritative baseline was never observed -- such a group parks exactly as quarantine would. This changes the previous behaviour, where every non-retriable failure parked until an application discarded it by hand.
 - Added `SwiftDataCollection.discardedConflicts`, a stream delivering each automatically discarded group once with the snapshot captured before repair. `conflictUpdates` reports only intent that is still parked, so it cannot carry a discard.
 - Added `conflictParked` and `conflictDiscarded` trace events.
@@ -18,7 +23,6 @@ All notable package changes are tracked here by release.
 - Made `wait()` cancellable. Cancelling the waiting task stops the wait; the mutation is durable and proceeds regardless.
 - Closed the last ordering gap. A handler failure whose failure-write also failed left its group durably `sending` and owned by nobody; the lane read that as a dispatch its coordinator still owned and stepped past it, letting later transactions overtake it until the next relaunch. The lane is the sole dispatcher and drains serially, so a `sending` entry it observes is never in flight: it now asks the owning collection to reclaim the group, which records the failure it could not record before, and holds if that write fails too. Only the coordinator that abandoned a dispatch reclaims it; every other `sending` record stays bootstrap's to replay.
 - Removed `CollectionDispatchWait`. Every mutation now returns once it is durably queued and holding its place in the store-wide order; callers needing the outcome await `CollectionTransaction.wait()`. The configuration was at the wrong seam: it was static per collection, but when a call should return is a property of the call, and one model has both capture paths that must not wait and interactive paths that want the result. Consumers passing `.durablyQueued` delete the argument and keep their behaviour exactly. Consumers relying on `.dispatchAttempted` should not reach for a replacement by reflex: neither is equivalent to it. `wait()` is stronger, waiting for authoritative readback rather than handler settlement, which can add substantial latency; `flush()` is store-wide and can wait on unrelated collections, so it belongs in tests, shutdown and maintenance rather than on an interactive write path. Most call sites need neither and should read row or transaction state asynchronously instead.
-- Scoped `.dispatchAttempted` to the caller's own transaction. The lane drains until it quiesces, so awaiting the whole drain bound an interactive write to every transaction the store happened to be carrying, including work queued after it in another collection. A write now returns once its own mutation has been offered to a handler.
 - Held the dispatch lane when a collection reports it cannot dispatch, rather than stepping past it. Offline pauses a collection, not one transaction, so treating it as a skip let a reconnecting store run a child ahead of its still-offline parent. The store now also brings coordinators online before opening the lane, and takes them offline after closing it.
 - Treated persisted `sending` transactions as lane barriers until their collection bootstraps. A process that dies mid-dispatch leaves that state on disk, and only the owning collection rewrites it for replay, so the lane must hold rather than run its successors.
 - Stopped dispatch-group compaction at any unsubmitted transaction anywhere in the store. The scan was collection-local, so it could fold a later update into an earlier request and submit it ahead of an intervening transaction in another collection.
@@ -30,6 +34,10 @@ All notable package changes are tracked here by release.
 - The lane advances on outbound handler return rather than adapter readback, so later writes are not coupled to txid latency. Terminal `conflicted` transactions are stepped past instead of blocking the store, while same-key successors stay behind them as before.
 - A retryable transaction holds the lane until its backoff elapses, and replay holds behind an earlier transaction whose collection has not been created yet, so restart replay preserves the recorded write order.
 - Added the `dispatchDeferred` trace event for lane ordering decisions, and moved `replayStarted` to collection bootstrap where persisted work is actually loaded.
+
+## v0.2.0 - 2026-09-06
+
+Requires an explicit source and schema migration; see "Upgrading To v0.2.0" in the README.
 
 - Added coordinated conflict repair backed by private per-dirty-key authoritative evidence and a deterministic materializer shared by the coordinator, Electric adapter, and Fetch adapter. SwiftData application models remain the only UI read/query layer.
 - Added durable conflict-group inspection through `conflicts()` and `conflictUpdates`, plus atomic `discard(_:)` that repairs visible rows and never-submitted successor payloads while preserving already-submitted request bodies.
@@ -49,6 +57,7 @@ All notable package changes are tracked here by release.
 - Pause outbound outbox dispatch while offline, keep optimistic SwiftData writes durable, and resume eligible work on reconnect.
 - Made failed transactions eligible for immediate retry when connectivity returns.
 - Added `CollectionNonRetriableError` for permanent handler failures that should mark local state conflicted instead of retrying.
+- Added `CollectionDispatchWait` so a collection can choose whether writes return once durably queued or once outbound dispatch has been attempted. The default, `.dispatchAttempted`, preserves existing behaviour; `.durablyQueued` keeps latency-sensitive local-first writes off the network round trip.
 - Exposed `SwiftDataCollection.flush()` so callers can drain pending dispatch explicitly, which `.durablyQueued` collections need in tests and shutdown paths.
 - Documented current TanStack offline-transaction parity, intentional SwiftData/Electric differences, and future cross-collection scheduling work.
 
