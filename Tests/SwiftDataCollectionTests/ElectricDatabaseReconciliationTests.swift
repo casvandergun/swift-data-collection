@@ -489,7 +489,7 @@ struct ElectricDatabaseReconciliationTests {
         #expect(pendingAfter.status == .resolved)
     }
 
-    @Test("Failed optimistic delete keeps row visible and retryable")
+    @Test("Failed optimistic delete stays pending deletion and retryable")
     func failedDeleteRemainsRecoverable() async throws {
         enum SampleError: Error { case sendFailed }
 
@@ -516,7 +516,7 @@ struct ElectricDatabaseReconciliationTests {
 
         let context = ModelContext(container)
         let todo = try #require(context.fetch(testTodoIdentifier.fetchDescriptor(for: "todo-1")).first)
-        #expect(todo.collectionSyncState == .error)
+        #expect(todo.collectionSyncState == .pendingDelete)
         #expect(todo.collectionPendingMutationCount == 1)
 
         let pending = try #require(context.fetch(FetchDescriptor<ElectricPendingMutation>()).first)
