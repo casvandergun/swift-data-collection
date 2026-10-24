@@ -90,6 +90,7 @@ package actor CollectionDispatchLane {
 
     private var runtimesByCollectionID: [String: any CollectionRuntime] = [:]
     private var connectivityState: CollectionConnectivityState
+    private var isClosed = false
     private var isDraining = false
     private var drainRequestedAgain = false
     private var drainWaiters: [CheckedContinuation<Void, Never>] = []
@@ -113,15 +114,24 @@ package actor CollectionDispatchLane {
     }
 
     package func register(_ runtime: any CollectionRuntime, collectionID: String) {
+        guard !isClosed else { return }
         runtimesByCollectionID[collectionID] = runtime
     }
 
     package func setConnectivityState(_ state: CollectionConnectivityState) {
-        guard connectivityState != state else { return }
+        guard !isClosed, connectivityState != state else { return }
         connectivityState = state
         if state == .offline {
             cancelScheduledRetry()
         }
+    }
+
+    package func close() async {
+        isClosed = true
+        connectivityState = .offline
+        cancelScheduledRetry()
+        await drain()
+        runtimesByCollectionID.removeAll()
     }
 
     /// Drains the lane, and guarantees that work durably queued before this
@@ -131,6 +141,7 @@ package actor CollectionDispatchLane {
     /// pass may already be past the point where it would have seen the new
     /// transaction. It instead requests another pass and waits for that.
     package func drain() async {
+        guard !isClosed || isDraining else { return }
         guard isDraining == false else {
             drainRequestedAgain = true
             await withCheckedContinuation { drainWaiters.append($0) }

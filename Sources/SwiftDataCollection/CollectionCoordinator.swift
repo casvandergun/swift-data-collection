@@ -3,6 +3,7 @@ import SwiftData
 
 package protocol CollectionRuntime: Actor {
     func flush() async
+    func close() async
     func setConnectivityState(_ state: CollectionConnectivityState) async
     func reportAdapterApplied(
         sourceID: String,
@@ -191,6 +192,16 @@ actor CollectionCoordinator<
     func stop() async {
         await adapterRuntime.stop()
         await transitionLifecycle(to: .idle, reason: "collection stop requested", errorMessage: nil)
+    }
+
+    func close() async {
+        await stop()
+        for transaction in liveTransactions.values { await transaction.close() }
+        liveTransactions.removeAll()
+        for continuation in conflictContinuations.values { continuation.finish(throwing: CancellationError()) }
+        conflictContinuations.removeAll()
+        for continuation in discardedConflictContinuations.values { continuation.finish() }
+        discardedConflictContinuations.removeAll()
     }
 
     func refresh() async {

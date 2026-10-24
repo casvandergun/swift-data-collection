@@ -59,6 +59,8 @@ public actor SwiftDataCollectionStore {
     private let foregroundObserverRegistrar: CollectionForegroundObserverRegistrar
     private let connectivityMonitor: any CollectionConnectivityMonitoring
 
+    private var isClosed = false
+    private var closeTask: Task<Void, Never>?
     private var bootstrapCompleted = false
     private var foregroundObserversInstalled = false
     private var foregroundObserverTokens: [CollectionForegroundObserverToken] = []
@@ -121,8 +123,10 @@ public actor SwiftDataCollectionStore {
         _ model: Model.Type,
         options: CollectionOptions<Model, ID>
     ) async throws -> SwiftDataCollection<Model, ID> {
+        guard !isClosed else { throw SwiftDataCollectionStoreError.closed }
         try SwiftDataCollectionSchema.validate(modelContainer)
         await bootstrapIfNeeded()
+        guard !isClosed else { throw SwiftDataCollectionStoreError.closed }
 
         let descriptor = CollectionManagedSourceDescriptor(sourceID: options.adapter.sourceID)
         if let existing = registrationsByModelName[options.modelName] {
@@ -166,9 +170,17 @@ public actor SwiftDataCollectionStore {
             collectionID: collectionID,
             options: options
         )
+        guard !isClosed else {
+            await coordinator.close()
+            throw SwiftDataCollectionStoreError.closed
+        }
         coordinatorsByCollectionID[collectionID] = coordinator
         await dispatchLane.register(coordinator, collectionID: collectionID)
         await coordinator.bootstrapIfNeeded()
+        guard !isClosed else {
+            await coordinator.close()
+            throw SwiftDataCollectionStoreError.closed
+        }
 
         let collection = SwiftDataCollection(
             coordinator: coordinator,
@@ -190,8 +202,44 @@ public actor SwiftDataCollectionStore {
     }
 
     public func flush() async {
+        guard !isClosed else { return }
         await bootstrapIfNeeded()
+        guard !isClosed else { return }
         await dispatchLane.drain()
+    }
+
+    /// Permanently closes this store's runtime without deleting its durable
+    /// rows or outbox. Repeated calls join the same drain. Retire collection
+    /// and shape handles afterward; a later session uses a new store.
+    public func close() async {
+        if let closeTask { await closeTask.value; return }
+        guard !isClosed else { return }
+        isClosed = true
+        for token in foregroundObserverTokens { token.cancel() }
+        foregroundObserverTokens.removeAll()
+        connectivityMonitor.stop()
+        let observing = connectivityObserverTask
+        connectivityObserverTask = nil
+        observing?.cancel()
+        let closing = Task {
+            // Closing dispatch first cancels retries and drains only the
+            // already executing handler. Queued work stays durable.
+            await dispatchLaneStorage?.close()
+            for coordinator in orderedCoordinators {
+                await coordinator.setConnectivityState(.offline)
+                await coordinator.close()
+            }
+            for registration in registrationsByModelName.values {
+                await registration.shapeFactory?.stop()
+            }
+            await observing?.value
+            registrationsByModelName.removeAll()
+            coordinatorsByCollectionID.removeAll()
+            dispatchLaneStorage = nil
+        }
+        closeTask = closing
+        await closing.value
+        closeTask = nil
     }
 
     package func reportAdapterApplied(
@@ -222,7 +270,7 @@ public actor SwiftDataCollectionStore {
     }
 
     private func bootstrapIfNeeded() async {
-        guard bootstrapCompleted == false else { return }
+        guard !isClosed, bootstrapCompleted == false else { return }
         bootstrapCompleted = true
         connectivityMonitor.start()
         connectivityState = connectivityMonitor.currentState()
@@ -241,7 +289,7 @@ public actor SwiftDataCollectionStore {
     }
 
     private func setConnectivityState(_ state: CollectionConnectivityState) async {
-        guard connectivityState != state else { return }
+        guard !isClosed, connectivityState != state else { return }
         connectivityState = state
         /*
          * The lane is opened last and closed first, because a collection that
@@ -326,6 +374,10 @@ public actor SwiftDataCollectionStore {
         )
 
         let adapterRuntime = try await options.adapter.makeRuntime(context)
+        guard !isClosed else {
+            await adapterRuntime.stop()
+            throw SwiftDataCollectionStoreError.closed
+        }
         let createdCoordinator = CollectionCoordinator<Model, ID>(
             collectionID: collectionID,
             configuration: options,
@@ -378,6 +430,7 @@ package actor CollectionAdapterEventRelay<
 }
 
 public enum SwiftDataCollectionStoreError: Error, Sendable {
+    case closed
     case managedShapeConflict(
         modelName: String,
         existingKind: CollectionManagedRegistrationKind,
@@ -397,7 +450,10 @@ extension SwiftDataCollectionStore {
         registrationsByModelName[modelName]
     }
 
-    package func register(_ registration: CollectionManagedModelRegistration) {
+    package var storeIsClosed: Bool { isClosed }
+
+    package func register(_ registration: CollectionManagedModelRegistration) throws {
+        guard !isClosed else { throw SwiftDataCollectionStoreError.closed }
         registrationsByModelName[registration.modelName] = registration
     }
 

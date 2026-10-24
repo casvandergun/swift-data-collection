@@ -442,3 +442,13 @@ Run the suite with:
 ```sh
 swift test
 ```
+
+### Closing a session's store
+
+Call `await store.close()` before replacing a session-owned store. It removes
+foreground and connectivity observers, cancels retry scheduling, drains an
+already executing mutation handler, and stops registered collections and shapes.
+Pending outbox work and SwiftData rows stay on disk; local transaction waits end
+with cancellation. Retire the old handles and create a new store for the next
+session. Closing is terminal and idempotent; `flush()` afterward does no work and
+new registrations throw `SwiftDataCollectionStoreError.closed`.

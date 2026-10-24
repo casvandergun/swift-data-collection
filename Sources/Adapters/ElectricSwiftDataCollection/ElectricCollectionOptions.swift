@@ -350,6 +350,7 @@ public extension SwiftDataCollectionStore {
         )
         let descriptor = CollectionManagedSourceDescriptor(sourceID: resolvedShapeID)
 
+        guard !storeIsClosed else { throw SwiftDataCollectionStoreError.closed }
         if let existing = existingRegistration(modelName: modelName) {
             guard existing.kind == .shape, existing.descriptor == descriptor else {
                 throw SwiftDataCollectionStoreError.managedShapeConflict(
@@ -391,18 +392,23 @@ public extension SwiftDataCollectionStore {
             extraParameters: extraParameters,
             batchApplier: nil
         )
-        register(
-            CollectionManagedModelRegistration(
-                modelName: modelName,
-                kind: .shape,
-                descriptor: descriptor,
-                debugName: nil,
-                shapeFactory: CollectionManagedShapeFactory {
-                    subscription
-                },
-                collectionFactory: nil
+        do {
+            try register(
+                CollectionManagedModelRegistration(
+                    modelName: modelName,
+                    kind: .shape,
+                    descriptor: descriptor,
+                    debugName: nil,
+                    shapeFactory: CollectionManagedShapeFactory(stop: { await subscription.stop() }) {
+                        subscription
+                    },
+                    collectionFactory: nil
+                )
             )
-        )
+        } catch {
+            await subscription.stop()
+            throw error
+        }
         return subscription
     }
 
