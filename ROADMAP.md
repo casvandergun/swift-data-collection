@@ -7,13 +7,13 @@ The package is intentionally split into two deliverables:
 1. `SwiftDataCollection`
    The SwiftData-first collection core: optimistic local mutations, transaction-first durable outbox state, replay, retry, lifecycle, and backend-neutral row materialization.
 2. `ElectricSwiftDataCollection`
-   The Electric adapter: Electric shape subscriptions, Electric row conversion, SwiftData materialization, and txid-backed authoritative completion. It depends on `ElectricSwift` v0.1.0 from GitHub.
+   The Electric adapter: Electric shape subscriptions, Electric row conversion, SwiftData materialization, and txid-backed authoritative completion. It depends on `ElectricSwift` v0.1.3 from GitHub.
 
 ## Current Status
 
-Latest released version: `v0.4.0`.
+Latest released version: `v0.4.1`.
 
-v0.4.0 adds a store-wide `willSave` hook, so applications derive local state from the rows each save writes instead of rescanning after every batch, and terminal `close()` for session-scoped stores. v0.3.0 introduced store-wide dispatch ordering; v0.2.0 added offline pause/resume, durable staged inserts, and coordinated conflict inspection and repair. See `CHANGELOG.md` for details.
+v0.4.1 updates ElectricSwift to fix a live SSE loop after multi-row transactions. v0.4.0 adds a store-wide `willSave` hook, so applications derive local state from the rows each save writes instead of rescanning after every batch, and terminal `close()` for session-scoped stores. v0.3.0 introduced store-wide dispatch ordering; v0.2.0 added offline pause/resume, durable staged inserts, and coordinated conflict inspection and repair. See `CHANGELOG.md` for details.
 
 The collection path is restart-grade and offline-aware. Transaction durability is transaction-first on disk, optimistic deletes are recoverable, retry/replay is autonomous, network loss pauses outbound dispatch, reconnect resumes eligible work, one managed shape or collection per model type is enforced, and the release-grade evidence bar is in place.
 
