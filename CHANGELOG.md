@@ -2,6 +2,10 @@
 
 All notable package changes are tracked here by release.
 
+## v0.4.1 - 2026-10-24
+
+- Updated `ElectricSwift` to v0.1.3, which fixes a live SSE loop. When one transaction changed several rows in a shape, the stream reopened at `<lsn>_0` after each up-to-date and received the later changes again, applying the same batch indefinitely. It now resumes after the last change received. No source or schema changes.
+
 ## v0.4.0 - 2026-10-24
 
 An additive release. No source or schema migration: new parameters have defaults, and no persisted model changed since v0.3.0.

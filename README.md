@@ -34,7 +34,7 @@ See [ROADMAP.md](/Users/casvandergun/Documents/projects/swift-data-collection/RO
   - mutation handlers that complete after an automatic refresh
   - `.deleteSyncedRows` and `.keepLocalRows` missing-row policies
 
-The adapter depends on [`ElectricSwift`](https://github.com/casvandergun/electric-swift) v0.1.0 for Electric protocol/runtime types.
+The adapter depends on [`ElectricSwift`](https://github.com/casvandergun/electric-swift) v0.1.3 for Electric protocol/runtime types.
 
 ## Architecture
 
