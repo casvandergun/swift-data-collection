@@ -281,19 +281,12 @@ public struct CollectionAdapter<
 }
 
 /*
- * How long a write waits before returning.
+ * One collection's model, identity, adapter, and handlers.
  *
- * `dispatchAttempted` keeps the original behaviour: the call returns once the
- * outbound dispatch for the transaction has settled, so post-dispatch state
- * (`awaiting`, `conflicted`) is observable the moment the write returns.
- *
- * `durablyQueued` returns as soon as the transaction is committed to the
- * outbox and leaves dispatch to the runtime. Prefer it wherever a write sits
- * on a latency-sensitive path: a local-first write should not wait on a round
- * trip, and on a slow network `dispatchAttempted` makes it do exactly that.
- * Durability is identical either way -- the outbox row is committed before
- * dispatch begins in both modes. Callers that still need the round trip await
- * `CollectionTransaction.wait()`, or drain the collection with `flush()`.
+ * Every write returns once its transaction is committed to the outbox and
+ * holds its place in the store-wide order; reaching the server is the dispatch
+ * lane's job. Callers that need the outcome await `CollectionTransaction.wait()`,
+ * and tests or shutdown paths drain with `flush()`.
  */
 public struct CollectionOptions<
     Model: SwiftDataCollectionModel,

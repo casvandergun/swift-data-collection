@@ -813,15 +813,12 @@ actor CollectionCoordinator<
 
     /*
      * Ordering is a store-level invariant, so a collection never dispatches
-     * its own queue. Both paths hand the decision to the shared lane, which
-     * calls back into `laneDispatch(transactionID:)` when this collection owns
-     * the next transaction in store-wide sequence order.
-     *
-     * The waiting form is for `.dispatchAttempted`; the non-waiting form backs
-     * `.durablyQueued`, where a write returns once local state is durable and
-     * reaching the server is the lane's job. Callers that genuinely need the
-     * round trip await `CollectionTransaction.wait()`; tests force it with
-     * `flush()`.
+     * its own queue. It hands the decision to the shared lane, which calls back
+     * into `laneDispatch(transactionID:)` when this collection owns the next
+     * transaction in store-wide sequence order. A write returns once local
+     * state is durable; reaching the server is the lane's job. Callers that
+     * genuinely need the round trip await `CollectionTransaction.wait()`; tests
+     * force it with `flush()`.
      */
     private func enqueueDispatchWithoutWaiting() {
         Task { await self.drainDispatchIfNeeded() }

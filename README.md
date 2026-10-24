@@ -347,6 +347,23 @@ server-transformed row. For generated or normalized server values, use Electric
 txid confirmation or the Fetch adapter's authoritative refresh. An update over
 authoritative absence is not implicitly an insert.
 
+## Upgrading To v0.4.0
+
+No source or schema migration. The store's `willSave` parameter and `close()`
+are additions. One behaviour change: shape-only subscriptions created through
+`SwiftDataCollectionStore.shape(...)` now apply inside the store's write gate,
+so their batches serialize with collection commits.
+
+## Upgrading To v0.3.0
+
+Delete any `CollectionDispatchWait` argument: every write now returns once it is
+durably queued, and callers that need the outcome await
+`CollectionTransaction.wait()`. Rename `.durablyQueued` to `.queued` where you
+switch on `CollectionTransactionStatus`. The runtime adds the private
+`CollectionStoreMetadata` model: schemas built with
+`SwiftDataCollectionSchema.models(including:)` include it, and a versioned
+application schema needs a new version that does.
+
 ## Upgrading To v0.2.0
 
 This release requires an explicit source and schema migration. Replace
