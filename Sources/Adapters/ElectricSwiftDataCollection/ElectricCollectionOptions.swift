@@ -222,7 +222,8 @@ actor ElectricCollectionAdapterRuntime<
             modelName: configuration.modelName,
             collectionID: context.collectionID,
             tracer: context.tracer,
-            debugLogger: context.debugLogger.electricDebugLogger
+            debugLogger: context.debugLogger.electricDebugLogger,
+            willSave: context.willSave
         )
         let resolvedShapeID = ElectricCollectionOptions<Model, ID>.resolvedShapeID(
             explicitShapeID: configuration.shapeID,
@@ -304,6 +305,7 @@ public extension SwiftDataCollectionStore {
         rowDecoder: CollectionRowDecoder = .init(),
         diagnostics: CollectionDiagnostics = .disabled,
         commitSave: @escaping @Sendable (ModelContext) throws -> Void = { try $0.save() },
+        willSave: CollectionWillSaveHandler? = nil,
         retryPolicy: any PendingMutationRetryDelaying = CollectionRetryPolicy()
     ) {
         self.init(
@@ -311,6 +313,7 @@ public extension SwiftDataCollectionStore {
             rowDecoder: rowDecoder,
             diagnostics: diagnostics,
             commitSave: commitSave,
+            willSave: willSave,
             retryPolicy: retryPolicy
         )
     }
@@ -378,7 +381,9 @@ public extension SwiftDataCollectionStore {
             modelContainer: storeModelContainer,
             rowDecoder: storeRowDecoder,
             debugLogger: storeDebugLogger.electricDebugLogger,
-            observer: nil
+            observer: nil,
+            writeGate: storeWriteGate,
+            willSave: storeWillSave
         )
         let subscription = await shapeStore.shape(
             model,

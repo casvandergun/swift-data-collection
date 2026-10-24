@@ -38,6 +38,7 @@ actor CollectionCoordinator<
     private let reconciler: CollectionMutationReconciler
     private let retryPolicy: any PendingMutationRetryDelaying
     private let commitSave: CollectionCommitSaver
+    private let willSave: CollectionWillSaveHandler?
     private let dispatchLane: CollectionDispatchLane
 
     private var bootstrapCompleted = false
@@ -68,6 +69,7 @@ actor CollectionCoordinator<
         tracer: CollectionTracer,
         writeGate: CollectionWriteGate = CollectionWriteGate(),
         commitSave: @escaping CollectionCommitSaver = { try $0.save() },
+        willSave: CollectionWillSaveHandler? = nil,
         retryPolicy: any PendingMutationRetryDelaying = CollectionRetryPolicy(),
         dispatchLane: CollectionDispatchLane,
         connectivityState: CollectionConnectivityState = .online
@@ -82,8 +84,14 @@ actor CollectionCoordinator<
         self.tracer = tracer
         self.writeGate = writeGate
         self.queue = CollectionMutationQueue(modelContainer: modelContainer)
-        self.reconciler = CollectionMutationReconciler(modelContainer: modelContainer)
-        self.commitSave = commitSave
+        self.reconciler = CollectionMutationReconciler(modelContainer: modelContainer, willSave: willSave)
+        // `commitSave` stays the injectable atomic-commit seam; the store's
+        // will-save hook runs first, so its changes join the same commit.
+        self.commitSave = { context in
+            try willSave?(context)
+            try commitSave(context)
+        }
+        self.willSave = willSave
         self.retryPolicy = retryPolicy
         self.dispatchLane = dispatchLane
         self.connectivityState = connectivityState
@@ -1900,6 +1908,7 @@ actor CollectionCoordinator<
 
     private func saveQueueContext() throws {
         try writeGate.withCriticalSection {
+            try willSave?(queue.context)
             try queue.saveContext()
         }
     }

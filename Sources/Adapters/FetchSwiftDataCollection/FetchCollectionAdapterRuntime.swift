@@ -15,6 +15,7 @@ actor FetchCollectionAdapterRuntime<
     private let rowDecoder: CollectionRowDecoder
     private let onApply: CollectionApplyHandler?
     private let writeGate: CollectionWriteGate
+    private let willSave: CollectionWillSaveHandler?
     private let tracer: CollectionTracer
     private let reportRefreshCompleted: @Sendable (Date?) async -> Void
     private let reportError: @Sendable (Error) async -> Void
@@ -36,6 +37,7 @@ actor FetchCollectionAdapterRuntime<
         self.rowDecoder = context.rowDecoder
         self.onApply = context.onApply
         self.writeGate = context.writeGate
+        self.willSave = context.willSave
         self.tracer = context.tracer
         self.reportRefreshCompleted = context.reportRefreshCompleted
         self.reportError = context.reportError
@@ -57,7 +59,8 @@ actor FetchCollectionAdapterRuntime<
                     rowDecoder: rowDecoder,
                     collectionID: collectionID,
                     modelName: configuration.modelName,
-                    missingRowPolicy: configuration.missingRowPolicy
+                    missingRowPolicy: configuration.missingRowPolicy,
+                    willSave: willSave
                 )
                 // A successful fetch is the Fetch adapter's authoritative
                 // completion boundary. The applier advances/materializes the
@@ -129,19 +132,22 @@ struct FetchCollectionSnapshotApplier<
     let collectionID: String
     let modelName: String
     let missingRowPolicy: FetchMissingRowPolicy
+    let willSave: CollectionWillSaveHandler?
 
     init(
         identifier: CollectionModelIdentifier<Model, ID>,
         rowDecoder: CollectionRowDecoder,
         collectionID: String? = nil,
         modelName: String,
-        missingRowPolicy: FetchMissingRowPolicy
+        missingRowPolicy: FetchMissingRowPolicy,
+        willSave: CollectionWillSaveHandler? = nil
     ) {
         self.identifier = identifier
         self.rowDecoder = rowDecoder
         self.collectionID = collectionID ?? "\(modelName):fetch:\(modelName):all"
         self.modelName = modelName
         self.missingRowPolicy = missingRowPolicy
+        self.willSave = willSave
     }
 
     struct ApplyResult: Sendable, Hashable {
@@ -263,6 +269,7 @@ struct FetchCollectionSnapshotApplier<
             }
         }
 
+        try willSave?(context)
         try context.save()
         return ApplyResult(
             insertedCount: insertedCount,

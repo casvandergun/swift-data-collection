@@ -44,6 +44,27 @@ The core/adapter split follows the TanStack collection-adapter responsibility mo
 - `ElectricSwiftDataCollection` owns Electric shape subscriptions, txid handling, Electric row translation, and shape-batch materialization into SwiftData.
 - App UI continues to read SwiftData directly with `@Query` or `FetchDescriptor`.
 
+### Keeping derived local state consistent
+
+`SwiftDataCollectionStore(modelContainer:willSave:)` takes a hook that runs immediately before every save the store makes -- local writes, rollbacks, staged writes, adapter batches, and confirmation. It runs in the writing context inside the store's write gate, and anything it changes is saved with the rows:
+
+```swift
+let store = SwiftDataCollectionStore(modelContainer: container) { context in
+    // Exactly what this save will write, with optimistic overlays applied.
+    for case let child as Child in context.insertedModelsArray + context.changedModelsArray {
+        let parentID = child.parentID
+        let parent = try context.fetch(
+            FetchDescriptor<Parent>(predicate: #Predicate { $0.id == parentID })
+        ).first
+        if child.parent?.persistentModelID != parent?.persistentModelID {
+            child.parent = parent
+        }
+    }
+}
+```
+
+Keep the hook proportional to the rows in the save, and use only the given context: calling collection APIs from it deadlocks on the write gate. A throw aborts the write.
+
 Electric protocol rows are translated at the adapter boundary:
 
 ```text

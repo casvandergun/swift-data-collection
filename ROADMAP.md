@@ -46,6 +46,7 @@ Ship the offline transaction hardening already on `main` together with coordinat
 - A schema-composition helper and startup validation for runtime metadata; v0.3.0 uses an explicit hard schema/source migration.
 - Distinct row states: `.error` for retryable failures and `.conflicted` for permanently refused intent.
 - Canonical Electric key normalization keeps backend UUID spelling differences from breaking row materialization or txid reconciliation.
+- A store-wide `willSave` hook that runs before every store save, so applications derive local state from the rows being written instead of rescanning after each batch.
 
 ### Planned Decisions
 

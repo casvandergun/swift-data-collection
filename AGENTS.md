@@ -74,6 +74,11 @@ The project is intentionally SwiftData-first:
 - `CollectionTransaction.wait()` means the final outcome: it survives retryable failures and settles only on authoritative completion or permanent refusal. Never settle a live transaction on a retryable error, and never discard its handle -- a retry that later succeeds must complete the handle the caller holds.
 - Retryable failures use bounded exponential backoff. `CollectionNonRetriableError` carries a `CollectionConflictDisposition`: `.discard` (default) abandons the intent through the shared atomic repair path and reports it on `discardedConflicts`, `.quarantine` parks it for inspection. Discard never reverts a row whose authoritative baseline is unknown; it parks instead.
 
+## Saves
+
+- Every save the store makes calls the store's `willSave` hook first, in the same context and inside the write gate. When adding a save path, call `willSave?(context)` immediately before `context.save()` (the coordinator's `commitSave` already does). `CollectionWillSaveTests` covers each path; extend it for a new one.
+- `commitSave` remains the injectable atomic-commit seam used by fault-injection tests. Do not route other saves through it.
+
 ## SwiftData Guidance
 
 - UI should query SwiftData directly via `@Query` / `FetchDescriptor`.

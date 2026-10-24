@@ -4,6 +4,9 @@ All notable package changes are tracked here by release.
 
 ## Unreleased - target v0.3.0
 
+- Added a store-wide `willSave` hook (`CollectionWillSaveHandler`) to `SwiftDataCollectionStore`. It runs in the writing context, inside the write gate, immediately before every save the store makes: local mutations, rollbacks, discards, staged writes, Electric and Fetch adapter batches, shape-only subscriptions, and txid confirmation. Changes it makes join that save, so an application can keep derived local state -- such as SwiftData relationships rebuilt from foreign-key columns -- consistent with exactly the rows being written, without rescanning its store after each batch. A throw aborts the write like a failed save; in an adapter batch that leaves the rows and the checkpoint unsaved. The existing post-save `onApply` is unchanged.
+- Shape-only subscriptions created through `SwiftDataCollectionStore.shape(...)` now apply batches inside the store's write gate, like collections, so they serialize with collection commits and run the `willSave` hook.
+
 - Added terminal `SwiftDataCollectionStore.close()`: stops foreground/connectivity observers, cancels retry scheduling, drains the active outbound handler and closes registered collections/shapes without removing durable rows or outbox work. A subsequent session uses a new store; closed stores reject new registrations.
 
 - Keep optimistic deletes in `.pendingDelete` while a retryable delete attempt is failed, so deleted rows remain hidden until the intent succeeds or is discarded.
