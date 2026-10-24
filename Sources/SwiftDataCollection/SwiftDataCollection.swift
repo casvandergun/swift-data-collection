@@ -103,6 +103,7 @@ public actor CollectionTransaction {
     public let id: UUID
     public let collectionID: String?
 
+    private var isClosed = false
     private var statusStorage: CollectionTransactionStatus = .queued
     private var waiters: [UUID: CheckedContinuation<Void, Error>] = [:]
     private var cancelledWaiters: Set<UUID> = []
@@ -126,6 +127,7 @@ public actor CollectionTransaction {
     /// Cancelling the waiting task stops the wait. It does not cancel the
     /// mutation, which is durable and proceeds regardless.
     public func wait() async throws {
+        guard !isClosed else { throw CancellationError() }
         switch statusStorage {
         case .completed:
             return
@@ -147,6 +149,11 @@ public actor CollectionTransaction {
                 Task { await self.cancelWaiter(waiterID) }
             }
         }
+    }
+
+    package func close() {
+        isClosed = true
+        resumeWaiters(throwing: CancellationError())
     }
 
     private func cancelWaiter(_ waiterID: UUID) {

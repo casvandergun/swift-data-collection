@@ -1045,9 +1045,11 @@ public enum CollectionManagedRegistrationKind: String, Sendable, Hashable {
 
 package final class CollectionManagedShapeFactory: @unchecked Sendable {
     package let make: @Sendable () -> Any
+    package let stop: @Sendable () async -> Void
 
-    package init(make: @escaping @Sendable () -> Any) {
+    package init(stop: @escaping @Sendable () async -> Void = {}, make: @escaping @Sendable () -> Any) {
         self.make = make
+        self.stop = stop
     }
 }
 

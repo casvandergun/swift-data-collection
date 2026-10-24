@@ -27,6 +27,8 @@ Ship the offline transaction hardening already on `main` together with coordinat
 
 ### Included From Current `main`
 
+- Explicit terminal store close for session-scoped consumers, preserving durable work while retiring observers, dispatch and read subscriptions.
+
 - Bounded retry delays and safe attempt-count saturation.
 - Injectable connectivity monitoring with an `NWPathMonitor` default.
 - Offline pause/resume for outbound outbox dispatch.
