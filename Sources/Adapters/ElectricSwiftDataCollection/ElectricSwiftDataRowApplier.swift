@@ -33,6 +33,7 @@ public struct ElectricSwiftDataRowApplier<Model: SwiftDataCollectionModel, ID: H
     public let identifier: CollectionModelIdentifier<Model, ID>
     public let collectionSchema: CollectionSchema
     public let debugLogger: ElectricDebugLogger
+    public let willSave: CollectionWillSaveHandler?
 
     private enum UpsertOutcome: String {
         case inserted
@@ -44,12 +45,14 @@ public struct ElectricSwiftDataRowApplier<Model: SwiftDataCollectionModel, ID: H
         identifier: CollectionModelIdentifier<Model, ID>,
         rowDecoder: CollectionRowDecoder = .init(),
         collectionSchema: CollectionSchema = .init(),
-        debugLogger: ElectricDebugLogger = .disabled
+        debugLogger: ElectricDebugLogger = .disabled,
+        willSave: CollectionWillSaveHandler? = nil
     ) {
         self.identifier = identifier
         self.rowDecoder = rowDecoder
         self.collectionSchema = collectionSchema
         self.debugLogger = debugLogger
+        self.willSave = willSave
     }
 
     public func apply(
@@ -177,6 +180,7 @@ public struct ElectricSwiftDataRowApplier<Model: SwiftDataCollectionModel, ID: H
             ]
         )
 
+        try willSave?(context)
         try context.save()
         let result = ElectricShapeApplyResult(
             resolvedTransactionIDs: [],

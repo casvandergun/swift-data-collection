@@ -78,6 +78,23 @@ public struct CollectionBatchApplySummary: Sendable, Hashable {
 public typealias CollectionApplyHandler =
     @Sendable (_ context: ModelContext, _ summary: CollectionBatchApplySummary) throws -> Void
 
+/// Runs immediately before every save a `SwiftDataCollectionStore` makes:
+/// local mutations, rollbacks, discards, staged publication, adapter batches,
+/// and txid confirmation.
+///
+/// It is called in the writing context, on that write's isolation, inside the
+/// store's write gate. Models it changes in `context` are part of the same
+/// save, so derived local state (for example SwiftData relationships rebuilt
+/// from foreign-key columns) commits atomically with the rows it describes.
+/// `context.insertedModelsArray`, `changedModelsArray`, and
+/// `deletedModelsArray` list exactly what the save will write, with optimistic
+/// overlays already applied.
+///
+/// A throw aborts the write the same way a failed save does. The handler must
+/// only use `context`: calling back into collection APIs from here deadlocks on
+/// the write gate.
+public typealias CollectionWillSaveHandler = @Sendable (_ context: ModelContext) throws -> Void
+
 package typealias CollectionAdapterMutationHandler<
     Model: SwiftDataCollectionModel,
     ID: Hashable & Sendable
@@ -239,6 +256,7 @@ package struct CollectionAdapterContext<
     package let debugLogger: CollectionDebugLogger
     package let tracer: CollectionTracer
     package let writeGate: CollectionWriteGate
+    package let willSave: CollectionWillSaveHandler?
     package let onApply: CollectionApplyHandler?
     package let reportApplied: @Sendable (Set<String>, Date?, String?) async -> Void
     package let reportRefreshCompleted: @Sendable (Date?) async -> Void

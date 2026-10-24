@@ -54,6 +54,7 @@ public actor SwiftDataCollectionStore {
     private let debugLogger: CollectionDebugLogger
     private let tracer: CollectionTracer
     private let commitSave: CollectionCommitSaver
+    private let willSave: CollectionWillSaveHandler?
     private let retryPolicy: any PendingMutationRetryDelaying
     private let retrySleep: CollectionRetrySleeper
     private let foregroundObserverRegistrar: CollectionForegroundObserverRegistrar
@@ -71,16 +72,20 @@ public actor SwiftDataCollectionStore {
     private var coordinatorsByCollectionID: [String: any CollectionRuntime] = [:]
     private var registrationsByModelName: [String: CollectionManagedModelRegistration] = [:]
 
+    /// - Parameter willSave: Called before every save this store makes. See
+    ///   `CollectionWillSaveHandler`.
     public init(
         modelContainer: ModelContainer,
         rowDecoder: CollectionRowDecoder = .init(),
-        diagnostics: CollectionDiagnostics = .disabled
+        diagnostics: CollectionDiagnostics = .disabled,
+        willSave: CollectionWillSaveHandler? = nil
     ) {
         self.init(
             modelContainer: modelContainer,
             rowDecoder: rowDecoder,
             diagnostics: diagnostics,
             commitSave: { try $0.save() },
+            willSave: willSave,
             retryPolicy: CollectionRetryPolicy(),
             retrySleep: defaultCollectionRetrySleep,
             foregroundObserverRegistrar: defaultForegroundObservers,
@@ -93,6 +98,7 @@ public actor SwiftDataCollectionStore {
         rowDecoder: CollectionRowDecoder = .init(),
         diagnostics: CollectionDiagnostics = .disabled,
         commitSave: @escaping CollectionCommitSaver = { try $0.save() },
+        willSave: CollectionWillSaveHandler? = nil,
         retryPolicy: any PendingMutationRetryDelaying = CollectionRetryPolicy(),
         retrySleep: @escaping CollectionRetrySleeper = defaultCollectionRetrySleep,
         foregroundObserverRegistrar: @escaping CollectionForegroundObserverRegistrar = defaultForegroundObservers,
@@ -103,6 +109,7 @@ public actor SwiftDataCollectionStore {
         self.debugLogger = diagnostics.logger
         self.tracer = diagnostics.tracer
         self.commitSave = commitSave
+        self.willSave = willSave
         self.retryPolicy = retryPolicy
         self.retrySleep = retrySleep
         self.foregroundObserverRegistrar = foregroundObserverRegistrar
@@ -357,6 +364,7 @@ public actor SwiftDataCollectionStore {
             debugLogger: debugLogger,
             tracer: tracer,
             writeGate: writeGate,
+            willSave: willSave,
             onApply: options.onApply,
             reportApplied: { observedTokens, lastSyncedAt, offset in
                 await relay.reportApplied(
@@ -389,6 +397,7 @@ public actor SwiftDataCollectionStore {
             tracer: tracer,
             writeGate: writeGate,
             commitSave: commitSave,
+            willSave: willSave,
             retryPolicy: retryPolicy,
             dispatchLane: dispatchLane,
             connectivityState: connectivityState
@@ -445,6 +454,8 @@ extension SwiftDataCollectionStore {
     package var storeRowDecoder: CollectionRowDecoder { rowDecoder }
     package var storeDebugLogger: CollectionDebugLogger { debugLogger }
     package var storeTracer: CollectionTracer { tracer }
+    package var storeWriteGate: CollectionWriteGate { writeGate }
+    package var storeWillSave: CollectionWillSaveHandler? { willSave }
 
     package func existingRegistration(modelName: String) -> CollectionManagedModelRegistration? {
         registrationsByModelName[modelName]

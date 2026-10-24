@@ -11,6 +11,7 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
     let collectionID: String?
     let tracer: CollectionTracer
     let debugLogger: ElectricDebugLogger
+    let willSave: CollectionWillSaveHandler?
 
     private enum UpsertChange {
         case inserted
@@ -43,7 +44,8 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
         modelName: String = String(reflecting: Model.self),
         collectionID: String? = nil,
         tracer: CollectionTracer = .disabled,
-        debugLogger: ElectricDebugLogger = .disabled
+        debugLogger: ElectricDebugLogger = .disabled,
+        willSave: CollectionWillSaveHandler? = nil
     ) {
         self.identifier = identifier
         self.rowDecoder = rowDecoder
@@ -52,6 +54,7 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
         self.collectionID = collectionID
         self.tracer = tracer
         self.debugLogger = debugLogger
+        self.willSave = willSave
     }
 
     func apply(
@@ -210,6 +213,7 @@ struct ElectricCollectionSynchronizer<Model: SwiftDataCollectionModel, ID: Hasha
             ]
         )
 
+        try willSave?(context)
         try context.save()
         for event in stagedEvents {
             traceStaged(

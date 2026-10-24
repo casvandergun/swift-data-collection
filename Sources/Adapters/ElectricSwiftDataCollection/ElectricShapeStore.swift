@@ -34,6 +34,7 @@ public actor ElectricShapeStore {
     private let debugLogger: ElectricDebugLogger
     private let sessionFactory: SessionFactory
     private let writeGate: CollectionWriteGate?
+    private let willSave: CollectionWillSaveHandler?
     private var observer: (any ElectricShapeStoreObserver)?
     private var batchAppliers: [String: ElectricShapeBatchApplyClosure] = [:]
 
@@ -64,6 +65,7 @@ public actor ElectricShapeStore {
             )
         }
         self.writeGate = nil
+        self.willSave = nil
         self.observer = observer
     }
 
@@ -74,7 +76,8 @@ public actor ElectricShapeStore {
         rowDecoder: CollectionRowDecoder = .init(),
         debugLogger: ElectricDebugLogger = .disabled,
         observer: (any ElectricShapeStoreObserver)? = nil,
-        writeGate: CollectionWriteGate
+        writeGate: CollectionWriteGate,
+        willSave: CollectionWillSaveHandler? = nil
     ) {
         self.shapeURL = shapeURL
         self.modelContainer = modelContainer
@@ -90,6 +93,7 @@ public actor ElectricShapeStore {
             )
         }
         self.writeGate = writeGate
+        self.willSave = willSave
         self.observer = observer
     }
 
@@ -109,6 +113,7 @@ public actor ElectricShapeStore {
         self.debugLogger = debugLogger
         self.sessionFactory = sessionFactory
         self.writeGate = nil
+        self.willSave = nil
         self.observer = observer
     }
 
@@ -141,13 +146,15 @@ public actor ElectricShapeStore {
         )
         let rowDecoder = self.rowDecoder
         let debugLogger = self.debugLogger
+        let willSave = self.willSave
 
         batchAppliers[resolvedShapeID] = batchApplier ?? { batch, shapeID, context in
             try ElectricSwiftDataRowApplier(
                 identifier: identifier,
                 rowDecoder: rowDecoder,
                 collectionSchema: collectionSchema,
-                debugLogger: debugLogger
+                debugLogger: debugLogger,
+                willSave: willSave
             )
             .apply(batch, shapeID: shapeID, in: context)
         }

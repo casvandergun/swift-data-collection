@@ -435,6 +435,7 @@ struct CollectionMutationQueue {
 
 struct CollectionMutationReconciler {
     let modelContainer: ModelContainer
+    var willSave: CollectionWillSaveHandler? = nil
 
     func resolveTransactions(
         observedTokens: Set<String>,
@@ -488,6 +489,7 @@ struct CollectionMutationReconciler {
                 .filter { completedTransactionIDs.contains($0.transactionID) }
             try materialize(context, Set(mutations.map(\.targetKey)))
         }
+        try willSave?(context)
         try context.save()
         remainingTokensByTransactionID = updatedRemaining
         awaitedTransactionIDsByToken = updatedAwaited
@@ -506,6 +508,7 @@ struct CollectionMutationReconciler {
                 .filter { $0.transactionID == id }
             try materialize(context, Set(mutations.map(\.targetKey)))
         }
+        try willSave?(context)
         try context.save()
         return resolved
     }
