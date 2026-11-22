@@ -2,16 +2,22 @@
 
 This roadmap tracks planned package work by version. See `CHANGELOG.md` for released changes.
 
-The package is intentionally split into two deliverables:
+The package provides the collection core and backend adapters:
 
 1. `SwiftDataCollection`
    The SwiftData-first collection core: optimistic local mutations, transaction-first durable outbox state, replay, retry, lifecycle, and backend-neutral row materialization.
 2. `ElectricSwiftDataCollection`
-   The Electric adapter: Electric shape subscriptions, Electric row conversion, SwiftData materialization, and txid-backed authoritative completion. It depends on `ElectricSwift` v0.1.3 from GitHub.
+   Electric shape subscriptions, row conversion, SwiftData materialization, and txid-backed completion using `ElectricSwift` v0.1.3.
+3. `FetchSwiftDataCollection`
+   Snapshot materialization and write confirmation through a refresh.
+4. `NeonRealtimeSwiftDataCollection`
+   Sealed-query synchronization and durable write confirmation using `RawLiveQuerySubscription` from the standalone `NeonRealtimeSwift` v0.2.0.
 
 ## Current Status
 
-Latest released version: `v0.4.1`.
+Latest released version: `v0.5.0`.
+
+v0.5.0 adds the Neon Realtime adapter, with sealed-query synchronization, reconnect, and local confirmation retries for accepted writes.
 
 v0.4.1 updates ElectricSwift to fix a live SSE loop after multi-row transactions. v0.4.0 adds a store-wide `willSave` hook, so applications derive local state from the rows each save writes instead of rescanning after every batch, and terminal `close()` for session-scoped stores. v0.3.0 introduced store-wide dispatch ordering; v0.2.0 added offline pause/resume, durable staged inserts, and coordinated conflict inspection and repair. See `CHANGELOG.md` for details.
 
@@ -54,6 +60,7 @@ The Electric adapter contains the old read-side SwiftData sync pieces, so there 
 
 ### Adapter And Type Ergonomics
 
+- Add in-place capability renewal to the client-owned Neon subscription for long-lived collections.
 - Support deferred or async resolution of request headers and extra parameters.
 - Expand schema-driven coercion beyond the currently implemented common scalars, arrays, and JSON shapes.
 - Thread `ElectricCollectionSyncUtilities` through richer handler contexts if the public API needs it, while keeping Electric-specific utilities out of `SwiftDataCollection`.
@@ -106,7 +113,7 @@ Private base metadata retained only for unresolved keys is permitted as write-co
 
 The Swift implementation should match TanStack's behavior where it maps cleanly to SwiftData, but these differences are intentional or still open:
 
-- **Authoritative completion:** TanStack removes an outbox transaction when the mutation function succeeds. Electric-backed collections may remain `.awaiting` until observed txids or refresh completion prove that SwiftData has seen the authoritative write.
+- **Authoritative completion:** TanStack removes an outbox transaction when the mutation function succeeds. SwiftDataCollection may remain `.awaiting` until its saved result covers the write. A successful Neon no-op resolves from the saved authoritative baseline and removes its optimistic overlay.
 - **Permanent failures:** TanStack's `NonRetriableError` removes the transaction from the outbox and rejects waiters; its optimistic state was only ever an in-memory overlay, so dropping it costs nothing durable. SwiftDataCollection wrote optimistically into SwiftData, the application's real database, so it makes the choice explicit: `.discard` abandons the intent and repairs the row from retained authoritative evidence, `.quarantine` keeps it parked for inspection, and a discard whose baseline is unknown parks rather than guessing.
 - **Scheduling scope:** both schedule through one global serial executor. TanStack's `KeyScheduler` holds a single running slot and only ever runs the queue head, ordering by `createdAt`; its `maxConcurrency` config field is not read. SwiftDataCollection orders by a persisted monotonic sequence instead of wall-clock time, and must additionally step past parked conflicts because it retains permanently refused intent where TanStack removes it.
 - **Storage and leadership:** TanStack needs IndexedDB/localStorage fallback and Web Locks/BroadcastChannel leader election. SwiftDataCollection uses SwiftData durability and does not have browser tab leadership.

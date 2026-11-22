@@ -437,6 +437,65 @@ struct CollectionMutationReconciler {
     let modelContainer: ModelContainer
     var willSave: CollectionWillSaveHandler? = nil
 
+    /// Resolve writes against a saved result using the same context that stages
+    /// any incoming row changes. The caller commits the context before notifying waiters.
+    func stageConfirmedTransactions(
+        collectionID: String,
+        transactionIDs: Set<UUID>?,
+        observation: CollectionObservation,
+        in context: ModelContext,
+        baselineEvidence: (String) throws -> CollectionBaselineEvidence?,
+        materialize: (Set<String>) throws -> Void
+    ) throws -> [UUID] {
+        let awaiting = PendingTransactionState.awaiting.rawValue
+        let descriptor = FetchDescriptor<PendingCollectionTransaction>(
+            predicate: #Predicate { $0.collectionID == collectionID && $0.statusRawValue == awaiting }
+        )
+        let eligible = try context.fetch(descriptor).filter { transaction in
+            guard transactionIDs?.contains(transaction.id) ?? true,
+                  let completion = transaction.completion() else { return false }
+            switch completion {
+            case .unchanged:
+                return true
+            case .awaitTokens(let tokens):
+                return !tokens.isEmpty && tokens.allSatisfy(observation)
+            case .immediate, .refresh:
+                return false
+            }
+        }
+        guard !eligible.isEmpty else { return [] }
+
+        let eligibleIDs = Set(eligible.map(\.id))
+        let mutationDescriptor = FetchDescriptor<PendingCollectionMutation>(
+            predicate: #Predicate { eligibleIDs.contains($0.transactionID) }
+        )
+        let mutationsByID = Dictionary(grouping: try context.fetch(mutationDescriptor), by: \.transactionID)
+        var completed: [UUID] = []
+        var touchedKeys: Set<String> = []
+        for transaction in eligible {
+            guard let mutations = mutationsByID[transaction.id], !mutations.isEmpty else { continue }
+            let keys = Set(mutations.map(\.targetKey))
+            // Removing an overlay requires known authoritative state for its row.
+            guard try keys.allSatisfy({ key in
+                switch try baselineEvidence(key) {
+                case .observedRow, .absent: true
+                default: false
+                }
+            }) else { continue }
+
+            for mutation in mutations {
+                mutation.status = .resolved
+                mutation.errorMessage = nil
+            }
+            transaction.status = .resolved
+            transaction.lastErrorMessage = nil
+            completed.append(transaction.id)
+            touchedKeys.formUnion(keys)
+        }
+        try materialize(touchedKeys)
+        return completed
+    }
+
     func resolveTransactions(
         observedTokens: Set<String>,
         collectionID: String,

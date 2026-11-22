@@ -142,7 +142,7 @@ struct ElectricDatabaseReconciliationTests {
         enum SampleError: Error { case sendFailed }
 
         actor AttemptTracker {
-            private var count = 0
+            private(set) var count = 0
 
             func next() -> Int {
                 count += 1
@@ -174,18 +174,11 @@ struct ElectricDatabaseReconciliationTests {
             TestTodo(id: "todo-1", projectID: "project-a", title: "Inserted")
         }
 
-        try await waitUntilRetrying(transaction)
+        try await waitUntil { await transaction.status == .awaiting }
+        try #require(await transaction.status == .awaiting)
+        #expect(await tracker.count == 2)
 
         let context = ModelContext(container)
-        let deadline = Date().addingTimeInterval(1)
-        while Date() < deadline {
-            let pending = try context.fetch(FetchDescriptor<ElectricPendingMutation>())
-            if pending.first?.status == .awaiting {
-                break
-            }
-            try await Task.sleep(nanoseconds: 20_000_000)
-        }
-
         let retriedMutation = try #require(context.fetch(FetchDescriptor<ElectricPendingMutation>()).first)
         #expect(retriedMutation.status == .awaiting)
         let retriedRow = try #require(context.fetch(testTodoIdentifier.fetchDescriptor(for: "todo-1")).first)

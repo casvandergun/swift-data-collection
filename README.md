@@ -9,7 +9,7 @@ The package is intentionally SwiftData-first:
 - `ElectricSwiftDataCollection` is the first adapter implementation.
 - There is no second in-memory collection row store.
 
-See [ROADMAP.md](/Users/casvandergun/Documents/projects/swift-data-collection/ROADMAP.md) for planned parity and runtime work.
+See [ROADMAP.md](ROADMAP.md) for planned parity and runtime work.
 
 ## Package Layout
 
@@ -34,7 +34,11 @@ See [ROADMAP.md](/Users/casvandergun/Documents/projects/swift-data-collection/RO
   - mutation handlers that complete after an automatic refresh
   - `.deleteSyncedRows` and `.keepLocalRows` missing-row policies
 
-The adapter depends on [`ElectricSwift`](https://github.com/casvandergun/electric-swift) v0.1.3 for Electric protocol/runtime types.
+- `NeonRealtimeSwiftDataCollection`
+  - one sealed Neon query backed by `neonCollectionOptions(...)`
+  - atomic snapshot and change application with committed transaction confirmation
+
+The Electric adapter uses [`ElectricSwift`](https://github.com/casvandergun/electric-swift) v0.1.3. The Neon adapter uses the standalone [`NeonRealtimeSwift`](https://github.com/casvandergun/neon-realtime-swift) v0.2.0.
 
 ## Architecture
 
@@ -114,6 +118,46 @@ await todos.start()
 ```
 
 The fetch adapter treats each successful fetch as the complete authoritative snapshot for the named `scopeID`. It does not manage dynamic subsets or overlapping query keys; bound the fetch closure itself, for example by project or account, when the server table is large. Mutation completion assumes the fetch endpoint provides adequate read-after-write behavior.
+
+## Neon Realtime Collection
+
+Add [SwiftDataCollection](https://github.com/casvandergun/swift-data-collection) at version `0.5.0` or later and link its `NeonRealtimeSwiftDataCollection` product. Add the `NeonRealtimeSwift` product from [NeonRealtimeSwift](https://github.com/casvandergun/neon-realtime-swift) at `0.2.0` for targets that import the client directly.
+
+The collection package requires Swift tools 6.3 and supports iOS 17 and macOS 14 or later.
+
+Register the application model with `SwiftDataCollectionSchema.models(including:)`. Give the collection a stable scope ID, a loader for fresh sealed capabilities, and the SwiftData fetch descriptor for the local rows this query owns.
+
+```swift
+import NeonRealtimeSwift
+import NeonRealtimeSwiftDataCollection
+import SwiftData
+import SwiftDataCollection
+
+let todos = try await store.collection(
+    Todo.self,
+    options: neonCollectionOptions(
+        scopeID: "project:\(projectID)",
+        identifier: todoIdentifier,
+        client: RealtimeClient(url: realtimeURL),
+        loadQuery: { try await api.sealTodoQuery(projectID: projectID) },
+        ownedRows: { FetchDescriptor(predicate: #Predicate<Todo> { $0.projectID == projectID }) },
+        decodeRow: decodeTodoResult,
+        onUpdate: { context in
+            if let txid = try await api.updateTodos(context.mutations).txid {
+                return .committed(txid: txid)
+            }
+            return .unchanged
+        }
+    )
+)
+await todos.start()
+```
+
+`decodeTodoResult` maps the query's column metadata and cells into a `CollectionRow` containing the stable model ID. Return `.committed(txid:)` with the decimal PostgreSQL transaction ID after a write commits. Return `.unchanged` when your backend accepts the request and changes no rows. The collection clears that optimistic mutation and restores saved authoritative state. Use `transaction.wait()` to wait for the result to be saved. If a local confirmation save fails after the server response is recorded, the collection retries that save using the saved evidence.
+
+In `loadQuery`, validate the HTTP status before decoding and throw `NeonRealtimeSubscriptionError.sealHTTPStatus(response.statusCode)` for unsuccessful responses. The underlying client subscription retries 408, 429, 5xx, and recognized network and Neon failures. It honors Neon retry delays and reconnects with a fresh capability after a heartbeat timeout or capability expiry. Saved rows stay visible until the replacement snapshot is saved.
+
+Keep the sealed query and local ownership scope aligned. Replacement snapshots remove missing owned rows and preserve staged drafts. A reset keeps the saved result visible until the replacement is ready. SwiftData queries provide local sort order.
 
 ## Electric-Backed Collection
 

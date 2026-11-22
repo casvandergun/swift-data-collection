@@ -46,6 +46,10 @@ actor CollectionCoordinator<
     private var liveTransactions: [UUID: CollectionTransaction] = [:]
     private var awaitedTransactionIDsByToken: [String: Set<UUID>] = [:]
     private var remainingTokensByTransactionID: [UUID: Set<String>] = [:]
+    private var savedObservation: CollectionObservation?
+    private var confirmationRetryIDs: Set<UUID> = []
+    private var confirmationRetryTask: Task<Void, Never>?
+    private var isClosed = false
     private var awaitingRefreshTransactionIDs: Set<UUID> = []
     private var connectivityState: CollectionConnectivityState
     private var inFlightDispatchIDs: Set<UUID> = []
@@ -97,6 +101,10 @@ actor CollectionCoordinator<
         self.connectivityState = connectivityState
     }
 
+    deinit {
+        confirmationRetryTask?.cancel()
+    }
+
     func bootstrapIfNeeded() async {
         guard bootstrapCompleted == false else { return }
         bootstrapCompleted = true
@@ -114,6 +122,7 @@ actor CollectionCoordinator<
         )
         debug("bootstrapping collection with \(pendingTransactions.count) persisted transactions")
 
+        var awaitingUnchangedIDs = Set<UUID>()
         for transaction in pendingTransactions {
             if transaction.status == .sending {
                 trace(
@@ -150,6 +159,8 @@ actor CollectionCoordinator<
                         message: "re-registered refresh completion during bootstrap",
                         metadata: transactionTraceMetadata(transaction)
                     )
+                case .unchanged:
+                    awaitingUnchangedIDs.insert(transaction.id)
                 case .immediate:
                     // Immediate completion is already represented by resolved
                     // mutation records. Keep bootstrap's cached context as the
@@ -168,6 +179,9 @@ actor CollectionCoordinator<
         try? saveQueueContext()
         invalidateQueueContext()
         refreshPendingModelStates()
+        if !awaitingUnchangedIDs.isEmpty {
+            await confirmFromSavedEvidence(transactionIDs: awaitingUnchangedIDs)
+        }
 
         let replayableTransactionIDs = pendingTransactions
             .filter { $0.status == .pending || $0.status == .failed }
@@ -203,6 +217,9 @@ actor CollectionCoordinator<
     }
 
     func close() async {
+        isClosed = true
+        confirmationRetryTask?.cancel()
+        confirmationRetryIDs.removeAll()
         await stop()
         for transaction in liveTransactions.values { await transaction.close() }
         liveTransactions.removeAll()
@@ -698,6 +715,123 @@ actor CollectionCoordinator<
         }
     }
 
+    func applyAndConfirm(
+        _ observation: @escaping CollectionObservation,
+        apply: @escaping @Sendable (ModelContext) throws -> Void
+    ) async throws {
+        try Task.checkCancellation()
+        let completed = try saveAuthoritativeChanges(observation, apply: apply)
+        savedObservation = observation
+        await finishConfirmedTransactions(completed)
+        await transitionLifecycle(
+            to: .ready,
+            reason: "authoritative changes saved",
+            errorMessage: nil,
+            lastSyncedAt: Date()
+        )
+        publishConflictSnapshot()
+        enqueueDispatchWithoutWaiting()
+    }
+
+    private func saveAuthoritativeChanges(
+        _ observation: CollectionObservation,
+        transactionIDs: Set<UUID>? = nil,
+        apply: ((ModelContext) throws -> Void)? = nil
+    ) throws -> [UUID] {
+        defer { invalidateQueueContext() }
+        return try writeGate.withCriticalSection {
+            let context = ModelContext(modelContainer)
+            try apply?(context)
+            let materializer = makeMaterializer(in: context)
+            let completed = try reconciler.stageConfirmedTransactions(
+                collectionID: collectionID,
+                transactionIDs: transactionIDs,
+                observation: observation,
+                in: context,
+                baselineEvidence: materializer.baselineEvidence(for:),
+                materialize: { keys in
+                    try materializer.rebuildNeverSubmittedSuccessorPayloads(for: keys)
+                    try materializer.materialize(keys: keys)
+                }
+            )
+            if apply != nil || !completed.isEmpty {
+                try willSave?(context)
+                try context.save()
+            }
+            return completed
+        }
+    }
+
+    private func confirmFromSavedEvidence(transactionIDs: Set<UUID>) async {
+        guard !isClosed else { return }
+        do {
+            let completed = try saveAuthoritativeChanges(
+                savedObservation ?? { _ in false },
+                transactionIDs: transactionIDs
+            )
+            confirmationRetryIDs.subtract(transactionIDs)
+            await finishConfirmedTransactions(completed)
+            if !completed.isEmpty {
+                publishConflictSnapshot()
+                enqueueDispatchWithoutWaiting()
+            }
+        } catch {
+            // The server response is durable. Retry only local confirmation,
+            // independently of connectivity and the outbound dispatch lane.
+            confirmationRetryIDs.formUnion(transactionIDs)
+            scheduleConfirmationRetry()
+            debugLogger.log(
+                .error,
+                category: "CollectionCoordinator",
+                message: "Failed to save write confirmation for \(configuration.debugName). Will retry: \(error)"
+            )
+        }
+    }
+
+    private func scheduleConfirmationRetry() {
+        guard confirmationRetryTask == nil else { return }
+        confirmationRetryTask = Task { [weak self] in
+            var delay = Duration.milliseconds(100)
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: delay)
+                } catch {
+                    return
+                }
+                guard await self?.retrySavedConfirmations() == true else { return }
+                delay = min(delay * 2, .seconds(5))
+            }
+        }
+    }
+
+    private func retrySavedConfirmations() async -> Bool {
+        if !confirmationRetryIDs.isEmpty {
+            await confirmFromSavedEvidence(transactionIDs: confirmationRetryIDs)
+        }
+        guard !confirmationRetryIDs.isEmpty else {
+            confirmationRetryTask = nil
+            return false
+        }
+        return true
+    }
+
+    private func finishConfirmedTransactions(_ transactionIDs: [UUID]) async {
+        confirmationRetryIDs.subtract(transactionIDs)
+        let handles = transactionIDs.compactMap { id -> CollectionTransaction? in
+            for token in remainingTokensByTransactionID.removeValue(forKey: id) ?? [] {
+                awaitedTransactionIDsByToken[token]?.remove(id)
+                if awaitedTransactionIDsByToken[token]?.isEmpty == true {
+                    awaitedTransactionIDsByToken.removeValue(forKey: token)
+                }
+            }
+            trace(.transactionCompleted, transactionID: id, message: "completed transaction from saved observation")
+            return liveTransactions.removeValue(forKey: id)
+        }
+        for handle in handles {
+            await handle.complete()
+        }
+    }
+
     func didApplyFromAdapter(
         observedTokens: Set<String>,
         lastSyncedAt: Date?,
@@ -949,15 +1083,16 @@ actor CollectionCoordinator<
                     )
                 }
 
-            case .awaitTokens(let tokens):
-                guard tokens.isEmpty == false else {
-                    throw CollectionError.missingAwaitedObservationTokens
+            case .awaitTokens, .unchanged:
+                try markDispatchGroupAwaiting(dispatch, completion: completion)
+
+                let tokens: Set<String> = if case .awaitTokens(let tokens) = completion { tokens } else { [] }
+                if !tokens.isEmpty {
+                    for representedTransactionID in dispatch.transactionIDs {
+                        register(transactionID: representedTransactionID, awaiting: tokens)
+                    }
                 }
-
-                try markDispatchGroupAwaiting(dispatch, completion: .awaitTokens(tokens))
-
                 for representedTransactionID in dispatch.transactionIDs {
-                    register(transactionID: representedTransactionID, awaiting: tokens)
                     if let liveTransaction = liveTransactions[representedTransactionID] {
                         await liveTransaction.markAwaiting()
                     }
@@ -972,6 +1107,9 @@ actor CollectionCoordinator<
                             ? "awaiting observation tokens from adapter"
                             : "awaiting observation tokens from compacted adapter dispatch"
                     )
+                }
+                if completion == .unchanged || savedObservation != nil {
+                    await confirmFromSavedEvidence(transactionIDs: Set(dispatch.transactionIDs))
                 }
 
             case .refresh:
@@ -1505,6 +1643,7 @@ actor CollectionCoordinator<
     ) async throws -> CollectionMutationCompletion {
         var awaitedTokens = Set<String>()
         var requiresRefresh = false
+        var receivedUnchanged = false
 
         for group in CollectionMutationDispatcher.groups(from: mutations) {
             let context = CollectionMutationContext<Model, ID>(transaction: transaction, mutations: group)
@@ -1551,6 +1690,17 @@ actor CollectionCoordinator<
                     message: "outbound handler completed immediately",
                     metadata: ["completion": "immediate"]
                 )
+            case .unchanged:
+                receivedUnchanged = true
+                trace(
+                    .handlerReturned,
+                    transactionID: transaction.id,
+                    key: group.first?.key,
+                    operation: group.first?.operation,
+                    pendingMutationCount: group.count,
+                    message: "outbound handler reported no row changes",
+                    metadata: ["completion": "unchanged"]
+                )
             case .refresh:
                 requiresRefresh = true
                 trace(
@@ -1589,7 +1739,7 @@ actor CollectionCoordinator<
         if awaitedTokens.isEmpty == false {
             return .awaitTokens(awaitedTokens)
         }
-        return .immediate
+        return receivedUnchanged ? .unchanged : .immediate
     }
 
     private func applyOptimisticChanges(

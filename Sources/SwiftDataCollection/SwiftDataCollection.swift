@@ -3,6 +3,7 @@ import SwiftData
 
 package enum CollectionMutationCompletion: Sendable, Hashable, Codable {
     case immediate
+    case unchanged
     case awaitTokens(Set<String>)
     case refresh
 }
@@ -203,7 +204,12 @@ public actor CollectionTransaction {
     }
 
     public func markAwaiting() {
-        statusStorage = .awaiting
+        switch statusStorage {
+        case .completed, .failed:
+            break
+        default:
+            statusStorage = .awaiting
+        }
     }
 
     /// Records a failed attempt without settling the transaction. Waiters stay
@@ -243,6 +249,10 @@ package protocol CollectionAdapterRuntime: Actor {
     func refresh() async
 }
 
+/// A cumulative view of the committed transaction tokens covered by this
+/// collection's authoritative rows, scoped to one source history.
+package typealias CollectionObservation = @Sendable (String) -> Bool
+
 package struct CollectionAdapterContext<
     Model: SwiftDataCollectionModel,
     ID: Hashable & Sendable
@@ -258,6 +268,13 @@ package struct CollectionAdapterContext<
     package let writeGate: CollectionWriteGate
     package let willSave: CollectionWillSaveHandler?
     package let onApply: CollectionApplyHandler?
+    /// Stage authoritative rows and confirm covered writes in one store save.
+    /// Provide immutable evidence covering the rows staged by this call and
+    /// earlier successful calls. The closure runs inside the store's write gate.
+    package let applyAndConfirm: @Sendable (
+        _ observation: @escaping CollectionObservation,
+        _ apply: @escaping @Sendable (ModelContext) throws -> Void
+    ) async throws -> Void
     package let reportApplied: @Sendable (Set<String>, Date?, String?) async -> Void
     package let reportRefreshCompleted: @Sendable (Date?) async -> Void
     package let reportError: @Sendable (Error) async -> Void

@@ -2,6 +2,17 @@
 
 All notable package changes are tracked here by release.
 
+## v0.5.0 - 2026-11-22
+
+This release adds the Neon Realtime adapter. Existing collections require no source or schema migration.
+
+- Added the `NeonRealtimeSwiftDataCollection` product for one sealed query per collection. It uses `RealtimeClient`, `SealedLiveQuery`, and `RawLiveQuerySubscription` from `NeonRealtimeSwift` v0.2.0.
+- Save replacement snapshots and buffered commits together. Apply incremental changes through the store write gate and confirm writes once the saved result covers them, regardless of whether the batch or write response arrives first.
+- Return `.committed(txid:)` for a committed write or `.unchanged` for an accepted no-op. No-ops restore the saved authoritative row and complete without waiting for a change batch.
+- Retry local confirmation saves after recording the accepted response. This uses saved evidence and leaves the outbound request settled.
+- Recover from transient seal HTTP failures, Neon cancellations, and stalled sockets. Reconnect honors Neon retry hints and loads a fresh capability. A stop during refresh leaves the subscription closed.
+
+
 ## v0.4.1 - 2026-10-24
 
 - Updated `ElectricSwift` to v0.1.3, which fixes a live SSE loop. When one transaction changed several rows in a shape, the stream reopened at `<lsn>_0` after each up-to-date and received the later changes again, applying the same batch indefinitely. It now resumes after the last change received. No source or schema changes.

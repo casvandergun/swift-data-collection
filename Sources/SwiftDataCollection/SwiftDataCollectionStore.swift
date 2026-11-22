@@ -366,6 +366,9 @@ public actor SwiftDataCollectionStore {
             writeGate: writeGate,
             willSave: willSave,
             onApply: options.onApply,
+            applyAndConfirm: { observation, apply in
+                try await relay.applyAndConfirm(observation, apply: apply)
+            },
             reportApplied: { observedTokens, lastSyncedAt, offset in
                 await relay.reportApplied(
                     observedTokens: observedTokens,
@@ -415,6 +418,14 @@ package actor CollectionAdapterEventRelay<
 
     func bind(_ coordinator: CollectionCoordinator<Model, ID>) {
         self.coordinator = coordinator
+    }
+
+    func applyAndConfirm(
+        _ observation: @escaping CollectionObservation,
+        apply: @escaping @Sendable (ModelContext) throws -> Void
+    ) async throws {
+        guard let coordinator else { throw CancellationError() }
+        try await coordinator.applyAndConfirm(observation, apply: apply)
     }
 
     func reportApplied(
