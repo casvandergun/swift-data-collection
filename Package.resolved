@@ -1,5 +1,5 @@
 {
-  "originHash" : "47d3e21a8f0d2bfdb17a04b0c79bd907ae18805f267c8b8a186e1dd04a6e8512",
+  "originHash" : "eda283adc7cb218d18da584e6f306b5006bb6a8d365c6d0ffdd259a3d91ad4d9",
   "pins" : [
     {
       "identity" : "electric-swift",
@@ -15,8 +15,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/casvandergun/neon-realtime-swift.git",
       "state" : {
-        "revision" : "5fea4bf940f9084a3bb2ecc803589eb15de5a848",
-        "version" : "0.2.0"
+        "revision" : "fe5ff07b03bbd865fda49417f77f2c9f2366a58e",
+        "version" : "0.2.1"
       }
     }
   ],

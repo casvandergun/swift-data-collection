@@ -2,6 +2,10 @@
 
 All notable package changes are tracked here by release.
 
+## v0.5.1 - 2026-11-22
+
+- Updated [NeonRealtimeSwift](https://github.com/casvandergun/neon-realtime-swift/releases/tag/v0.2.1) to v0.2.1. The client calls the existing `loadQuery` closure before expiry and renews on the active socket. SwiftData keeps the saved rows and continues confirming writes after save.
+
 ## v0.5.0 - 2026-11-22
 
 This release adds the Neon Realtime adapter. Existing collections require no source or schema migration.

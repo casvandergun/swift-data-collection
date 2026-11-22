@@ -38,7 +38,7 @@ See [ROADMAP.md](ROADMAP.md) for planned parity and runtime work.
   - one sealed Neon query backed by `neonCollectionOptions(...)`
   - atomic snapshot and change application with committed transaction confirmation
 
-The Electric adapter uses [`ElectricSwift`](https://github.com/casvandergun/electric-swift) v0.1.3. The Neon adapter uses the standalone [`NeonRealtimeSwift`](https://github.com/casvandergun/neon-realtime-swift) v0.2.0.
+The Electric adapter uses [`ElectricSwift`](https://github.com/casvandergun/electric-swift) v0.1.3. The Neon adapter uses the standalone [`NeonRealtimeSwift`](https://github.com/casvandergun/neon-realtime-swift) v0.2.1.
 
 ## Architecture
 
@@ -121,7 +121,7 @@ The fetch adapter treats each successful fetch as the complete authoritative sna
 
 ## Neon Realtime Collection
 
-Add [SwiftDataCollection](https://github.com/casvandergun/swift-data-collection) at version `0.5.0` or later and link its `NeonRealtimeSwiftDataCollection` product. Add the `NeonRealtimeSwift` product from [NeonRealtimeSwift](https://github.com/casvandergun/neon-realtime-swift) at `0.2.0` for targets that import the client directly.
+Add [SwiftDataCollection](https://github.com/casvandergun/swift-data-collection) at version `0.5.1` or later and link its `NeonRealtimeSwiftDataCollection` product. Add the `NeonRealtimeSwift` product from [NeonRealtimeSwift](https://github.com/casvandergun/neon-realtime-swift) at `0.2.1` for targets that import the client directly.
 
 The collection package requires Swift tools 6.3 and supports iOS 17 and macOS 14 or later.
 
@@ -155,7 +155,7 @@ await todos.start()
 
 `decodeTodoResult` maps the query's column metadata and cells into a `CollectionRow` containing the stable model ID. Return `.committed(txid:)` with the decimal PostgreSQL transaction ID after a write commits. Return `.unchanged` when your backend accepts the request and changes no rows. The collection clears that optimistic mutation and restores saved authoritative state. Use `transaction.wait()` to wait for the result to be saved. If a local confirmation save fails after the server response is recorded, the collection retries that save using the saved evidence.
 
-In `loadQuery`, validate the HTTP status before decoding and throw `NeonRealtimeSubscriptionError.sealHTTPStatus(response.statusCode)` for unsuccessful responses. The underlying client subscription retries 408, 429, 5xx, and recognized network and Neon failures. It honors Neon retry delays and reconnects with a fresh capability after a heartbeat timeout or capability expiry. Saved rows stay visible until the replacement snapshot is saved.
+The client calls `loadQuery` before a capability expires, even while the collection is healthy. Have your authenticated endpoint return a fresh seal for the same SQL and parameters. A successful renewal keeps the same subscription and SwiftData rows. Validate HTTP status before decoding and throw `NeonRealtimeSubscriptionError.sealHTTPStatus(response.statusCode)` for unsuccessful responses. The client retries 408, 429, and 5xx and honors Neon retry delays. After a disconnect or expired capability, saved rows stay visible until the replacement snapshot is saved.
 
 Keep the sealed query and local ownership scope aligned. Replacement snapshots remove missing owned rows and preserve staged drafts. A reset keeps the saved result visible until the replacement is ready. SwiftData queries provide local sort order.
 

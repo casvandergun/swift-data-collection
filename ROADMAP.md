@@ -11,11 +11,13 @@ The package provides the collection core and backend adapters:
 3. `FetchSwiftDataCollection`
    Snapshot materialization and write confirmation through a refresh.
 4. `NeonRealtimeSwiftDataCollection`
-   Sealed-query synchronization and durable write confirmation using `RawLiveQuerySubscription` from the standalone `NeonRealtimeSwift` v0.2.0.
+   Sealed-query synchronization and durable write confirmation using `RawLiveQuerySubscription` from the standalone `NeonRealtimeSwift` v0.2.1.
 
 ## Current Status
 
-Latest released version: `v0.5.0`.
+Latest released version: `v0.5.1`.
+
+v0.5.1 adds in-place capability renewal for Neon collections through their existing `loadQuery` closure.
 
 v0.5.0 adds the Neon Realtime adapter, with sealed-query synchronization, reconnect, and local confirmation retries for accepted writes.
 
@@ -60,7 +62,6 @@ The Electric adapter contains the old read-side SwiftData sync pieces, so there 
 
 ### Adapter And Type Ergonomics
 
-- Add in-place capability renewal to the client-owned Neon subscription for long-lived collections.
 - Support deferred or async resolution of request headers and extra parameters.
 - Expand schema-driven coercion beyond the currently implemented common scalars, arrays, and JSON shapes.
 - Thread `ElectricCollectionSyncUtilities` through richer handler contexts if the public API needs it, while keeping Electric-specific utilities out of `SwiftDataCollection`.
